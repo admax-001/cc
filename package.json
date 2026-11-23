@@ -1,0 +1,23 @@
+{
+  "name": "xf-api",
+  "version": "3.0.0-dev",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "gen:seed": "node scripts/gen-seed.js",
+    "dev": "wrangler dev --port 8787",
+    "deploy": "wrangler deploy",
+    "one-click": "node deploy.mjs",
+    "db:schema:local": "wrangler d1 execute xf --local --file=schema.sql",
+    "db:seed:local": "wrangler d1 execute xf --local --file=seed.sql",
+    "db:schema:remote": "wrangler d1 execute xf --remote --file=schema.sql",
+    "db:seed:remote": "wrangler d1 execute xf --remote --file=seed.sql",
+    "db:export": "wrangler d1 export xf --remote --output=backup.sql"
+  },
+  "dependencies": {
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

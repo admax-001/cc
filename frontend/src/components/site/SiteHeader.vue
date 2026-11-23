@@ -1,0 +1,300 @@
+<script setup>
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { useMediaQuery } from '@vueuse/core'
+import SvgIcon from '@/components/SvgIcon.vue'
+import DropdownMenu from '@/components/menu/DropdownMenu.vue'
+import DropdownItem from '@/components/menu/DropdownItem.vue'
+import SiteSearchModal from '@/components/modals/SiteSearchModal.vue'
+import { useThemeStore } from '@/stores/theme'
+import { useSiteLang, DOC_LANGS } from '@/composables/useSiteLang'
+
+defineProps({
+  // 传入滚动百分比时在 header 底部显示阅读进度条
+  progress: {
+    type: Number,
+    default: null
+  },
+  // 页面自带底色时隐藏 header 的底色与下边框
+  transparent: {
+    type: Boolean,
+    default: false
+  }
+})
+
+const route = useRoute()
+const router = useRouter()
+const themeStore = useThemeStore()
+const { lang, setLang } = useSiteLang()
+
+const logoUrl = new URL('@/assets/imgs/黑小帅.png', import.meta.url).href
+
+const LANG_SHORT = { zh: '中', en: 'EN', 'zh-Hant': '繁' }
+
+const currentLangLabel = computed(() => LANG_SHORT[lang.value] || '中')
+const isDownloadPage = computed(() => route.path.startsWith('/download'))
+// 文档页 URL 可能带语言层（/en/doc/api），按路径段判断
+const isDocPage = computed(() => /\/doc(\/|$)/.test(route.path))
+const docLink = computed(() => (route.params.lang ? `/${route.params.lang}/doc` : '/doc'))
+
+const isMobile = useMediaQuery('(max-width: 640px)')
+// 移动端收起源码入口；「查看文档」只在既不是文档页也不是下载页时才出现
+const showSourceLink = computed(() => !isMobile.value)
+const showDocsLink = computed(() => !isMobile.value || (!isDocPage.value && !isDownloadPage.value))
+// 文档页移动端把语言与主题收进侧边抽屉承载
+const showSitePrefs = computed(() => !isMobile.value || !isDocPage.value)
+
+// 搜索弹窗与快捷键：Mac 显示 ⌘K，其余平台显示 Ctrl K
+const showSearchModal = ref(false)
+const isMac = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent)
+const shortcutLabel = computed(() => (isMac ? '⌘K' : 'Ctrl K'))
+
+function onGlobalKeydown(event) {
+  if (showSearchModal.value || isDownloadPage.value || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'k') return
+  const target = event.target
+  if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return
+  event.preventDefault()
+  showSearchModal.value = true
+}
+
+onMounted(() => window.addEventListener('keydown', onGlobalKeydown))
+onUnmounted(() => window.removeEventListener('keydown', onGlobalKeydown))
+</script>
+
+<template>
+  <header class="site-header" :class="{ transparent }">
+    <div class="site-header-inner">
+      <div class="logo" @click="router.push('/')">
+        <img :src="logoUrl" alt="黑小帅" />
+      </div>
+      <button v-if="!isDownloadPage" type="button" class="site-search-btn" @click="showSearchModal = true">
+        <div class="site-search-btn-left">
+          <SvgIcon name="search" width="20" height="20" />
+          <span class="site-search-btn-label">搜索</span>
+        </div>
+        <div class="site-search-tip">{{ shortcutLabel }}</div>
+      </button>
+      <nav class="site-nav">
+        <button v-if="isMobile && !isDownloadPage" type="button" class="site-icon-btn site-nav-search" aria-label="搜索"
+          @click="showSearchModal = true">
+          <SvgIcon name="search" width="20" height="20" />
+        </button>
+        <button v-if="showSourceLink" class="site-nav-link" :class="{ active: isDownloadPage }"
+          @click="router.push('/download')">
+          <span>获取源码</span>
+        </button>
+
+        <button v-if="showDocsLink" class="site-nav-link" :class="{ active: isDocPage }" @click="router.push(docLink)">
+          <span>查看文档</span>
+        </button>
+
+        <div v-if="!isMobile" class="site-divider"></div>
+
+        <template v-if="showSitePrefs">
+          <DropdownMenu direction="down" menuClass="site-lang-menu">
+            <template #trigger>
+              <button class="site-icon-btn site-lang-btn">{{ currentLangLabel }}</button>
+            </template>
+            <template #menu>
+              <DropdownItem v-for="item in DOC_LANGS" :key="item.value" @click="setLang(item.value)">
+                {{ item.label }}
+              </DropdownItem>
+            </template>
+          </DropdownMenu>
+
+          <button class="site-icon-btn" @click="themeStore.toggleTwoTheme($event)">
+            <SvgIcon :name="themeStore.isDark ? 'sun' : 'moon'" width="20" height="20" />
+          </button>
+        </template>
+
+        <slot name="actions"></slot>
+      </nav>
+    </div>
+
+    <div v-if="progress !== null" class="site-progress" :style="{ width: `${progress}%` }"></div>
+
+    <SiteSearchModal v-if="showSearchModal" @close="showSearchModal = false" />
+  </header>
+</template>
+
+<style scoped>
+.site-header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 72px;
+  z-index: 1000;
+  background: var(--bg-color-primary);
+  border-bottom: 1px solid var(--border-color-primary);
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.site-header.transparent {
+  background: transparent;
+  border-bottom-color: transparent;
+}
+
+.site-header-inner {
+  max-width: 1280px;
+  height: 100%;
+  margin: 0 auto;
+  padding: 0 24px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.logo {
+  width: 68.32px;
+  height: 32px;
+  color: var(--button-text-color);
+  background: var(--primary-color);
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.logo img {
+  width: 68.32px;
+  height: 32px;
+}
+
+.site-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.site-search-btn {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 auto;
+  border-radius: 8px;
+  background-color: var(--bg-color-secondary);
+  border: 1.5px solid transparent;
+  width: 150px;
+  height: 40px;
+  color: var(--text-color-secondary);
+  cursor: pointer;
+  transition: border 0.2s ease;
+  font-size: 14px;
+}
+
+.site-search-btn:hover {
+  border-color: var(--primary-color);
+}
+.site-search-btn-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.site-search-tip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 50px;
+  padding: 2px;
+  border: 1.5px solid var(--border-color-primary);
+  border-radius: 4px;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 500;
+}
+
+.site-nav-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-color-secondary);
+  font-size: 14px;
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+
+.site-nav-link:hover,
+.site-nav-link.active {
+  color: var(--primary-color);
+}
+
+.site-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  height: 36px;
+  padding: 0 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-color-secondary);
+  font-size: 14px;
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+
+.site-icon-btn:hover {
+  color: var(--primary-color);
+}
+
+.site-divider {
+  width: 1px;
+  height: 20px;
+  margin: 0 8px;
+  background: var(--border-color-primary);
+}
+
+.site-lang-btn {
+  font-weight: 600;
+}
+
+.site-progress {
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  height: 1.5px;
+  opacity: 0.4;
+  background: var(--primary-color);
+  transition: width 0.1s linear;
+
+}
+
+:deep(.site-lang-menu) {
+  right: 0;
+  left: auto;
+  min-width: 140px;
+}
+
+/* 移动端只保留图标按钮与页面自定义入口，尺寸对齐主站移动端 header */
+@media (max-width: 640px) {
+  .site-nav-link {
+    height: 40px;
+    padding: 0 12px;
+    font-size: 15px;
+  }
+
+  .site-search-btn {
+    display: none;
+  }
+
+  .site-icon-btn {
+    min-width: 40px;
+    height: 40px;
+    font-size: 15px;
+  }
+
+  .site-nav-search {
+    border-radius: 50%;
+  }
+}
+</style>

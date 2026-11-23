@@ -1,0 +1,22 @@
+# 依赖与构建产物
+node_modules/
+dist/
+dist-verify/
+
+# wrangler 本地状态与凭据
+.wrangler/
+.dev.vars
+.wrangler/
+
+# 日志与备份
+*.log
+backup.sql
+
+# 编辑器与系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 临时目录
+.temp/
