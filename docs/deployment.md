@@ -22,7 +22,7 @@ node deploy.mjs      # 一键完成剩余全部
 | 1/8 | 依赖检查 | 缺 `node_modules` 自动 `npm install` |
 | 2/8 | 登录检查 | `wrangler whoami`，未登录给出引导 |
 | 3/8 | D1 数据库 | 已存在则跳过，不存在则创建 `xf` |
-| 4/8 | 回写配置 | `database_id` 自动写入 `wrangler.toml`（仓库里是占位符，无资源 ID 泄露） |
+| 4/8 | 回写配置 | `database_id` 自动写入 `wrangler.toml`（已是真实值则跳过） |
 | 5/8 | 建表 | 导入 `schema.sql` + V2/V3 迁移（幂等） |
 | 6/8 | 种子数据 | 已有用户则跳过（保护已注册账号与首个管理员） |
 | 7/8 | 前端构建 | Vue3 → `dist/`；`--api-only` 可跳过 |
@@ -56,13 +56,19 @@ npm run deploy        # 等价 wrangler deploy（跳过重新构建）
 
 ## 方式三：Cloudflare Git 集成（Workers Builds）
 
-仓库连接 Cloudflare 后，push 即自动构建部署。**务必把 Deploy command 设为
-`node deploy.mjs`**（默认 `npx wrangler deploy` 不会建库/回写占位符 database_id）：
+仓库连接 Cloudflare 后，push 即自动构建部署，构建设置**全部用默认值**：
 
 1. Cloudflare Dashboard → Workers & Pages → 创建 Worker → 连接 GitHub 仓库。
-2. 构建设置里 Deploy command 填 `node deploy.mjs`（构建命令留空即可）。
+2. Deploy command 保持默认 `npx wrangler deploy`；构建命令留空；根目录 `/`；
+   构建令牌与构建变量留空。dist/ 与 database_id 均已随仓库就绪，
+   JWT_SECRET 为 Worker 持久 secret，部署不会丢失。
 3. 每次推送到 `main` 自动部署；前端 `dist/` 已随仓库提交，本地改动后重跑
    `node deploy.mjs` 再推即可更新产物。
+
+> **全新 Cloudflare 账号（无现成 D1 库）部署本仓库**：先把 wrangler.toml 的
+> database_id 改回占位符 `local-dev-placeholder`，Deploy command 改为
+> `node deploy.mjs`，并在“构建令牌”填自定义 API Token（Workers Scripts:Edit
+> + D1:Edit + Account:Read）——默认构建令牌没有 D1 数据库权限，跑不了建库步骤。
 
 ## 方式四：API Token 纯命令行（服务器 / CI 无浏览器）
 
