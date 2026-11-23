@@ -11,7 +11,8 @@
 //   本地：set WORKER_NAME=cc&& set DB_NAME=cc&& node deploy.mjs
 //   CI（Workers Builds）：构建设置 → 构建变量填 WORKER_NAME、DB_NAME
 //   不设变量 = 默认实例 xf-api + xf（向后兼容）
-//   部署脚本会把 name/database_name/database_id 回写进 wrangler.toml 保持一致
+//   部署脚本会把 name/database_name/database_id 回写进 wrangler.toml 保持一致；
+//   并自动识别 CI 实际部署的 Worker 名，JWT_SECRET 按实际名注入（防配直名≠CI 名时漏注入）
 //
 // 脚本自动完成：
 //   1. 依赖检查（缺 node_modules 自动 npm install）
@@ -250,7 +251,7 @@ if (!mig4.ok) {
 }
 
 // 6. 种子数据：仅当库中无用户时导入（已有用户 → 跳过，保护已注册账号与首个管理员不被重置）
-T('\n[6/8] 导入种子数据 seed.sql（50 用户/200 笔记/800 评论）...')
+T('\n[6/8] 导入种子数据 seed.sql（已有用户则跳过保护）...')
 const cntOut = wr(['d1', 'execute', DB_NAME, '--remote', '--command', 'SELECT COUNT(*) AS n FROM users', '--json'])
 const cntMatch = cntOut.ok ? cntOut.out.match(/"n"\s*:\s*(\d+)/) : null
 const userCount = cntMatch ? parseInt(cntMatch[1], 10) : 0
@@ -313,6 +314,17 @@ const urlM = dep.out.match(/https:\/\/[\w.-]+\.workers\.dev/)
 const apiUrl = urlM ? urlM[0] : '（见上方部署输出）'
 T('  √ 部署成功')
 
+// CI（Workers Builds）会用“连接时的 Worker 名”覆盖 wrangler.toml 的 name。
+// 必须以【实际部署名】为准注入 secret——否则查错 Worker 会在旧实例上查到密钥而“误判已存在”，
+// 新 Worker 实际无 JWT_SECRET，注册/登录全部 500（服务器内部错误）。
+const ciNameM = dep.out.match(/CI system expected "([^"]+)"/)
+const urlNameM = urlM ? apiUrl.match(/^https:\/\/([\w-]+)\./) : null
+const ACTUAL_WORKER = (ciNameM && ciNameM[1]) || (urlNameM && urlNameM[1]) || WORKER_NAME
+if (ACTUAL_WORKER !== WORKER_NAME) {
+  T(`  ~ 注意：CI 实际部署的 Worker 名是「${ACTUAL_WORKER}」，与本次配置的「${WORKER_NAME}」不一致`)
+  T('    JWT_SECRET 将按实际名注入；建议在构建设置的“构建变量”里配 WORKER_NAME 与之保持一致')
+}
+
 // 7. 自检
 T('\n[8/8] 部署后自检 /api/health ...')
 if (urlM) {
@@ -331,11 +343,11 @@ if (urlM) {
 
 // 9. JWT_SECRET 兜底：未设置时自动生成并注入（认证/登录依赖它，缺失会导致登录注册不可用）
 T('\n[9/9] 检查 JWT_SECRET ...')
-const secList = wr(['secret', 'list', '--name', WORKER_NAME])
+const secList = wr(['secret', 'list', '--name', ACTUAL_WORKER])
 if (!secList.ok) {
   T('  ~ 无法查询 secret 列表（' + (secList.out || '').slice(-120).trim() + '）')
   T('  请手动确认并设置：')
-  T(`      npx wrangler secret put JWT_SECRET --name ${WORKER_NAME}`)
+  T(`      npx wrangler secret put JWT_SECRET --name ${ACTUAL_WORKER}`)
 } else if (/JWT_SECRET/i.test(secList.out)) {
   T('  √ JWT_SECRET 已存在（跳过，绝不覆盖线上密钥，已有登录态不受影响）')
 } else {
@@ -343,7 +355,7 @@ if (!secList.ok) {
   const newSecret = crypto.randomBytes(48).toString('base64url')
   const wc = wranglerCmd()
   const needShellSec = IS_WIN && /\.(cmd|bat)$/i.test(wc.cmd)
-  const put = spawnSync(wc.cmd, [...wc.args, 'secret', 'put', 'JWT_SECRET', '--name', WORKER_NAME], {
+  const put = spawnSync(wc.cmd, [...wc.args, 'secret', 'put', 'JWT_SECRET', '--name', ACTUAL_WORKER], {
     cwd: ROOT,
     encoding: 'utf8',
     timeout: 180000,
