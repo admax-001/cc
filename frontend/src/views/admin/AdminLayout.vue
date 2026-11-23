@@ -188,18 +188,26 @@ onMounted(async () => {
   try {
     adminStore.initializeAdmin()
     if (!adminStore.isLoggedIn) {
-      router.push('/admin/login')
-      return
+      // 无独立管理员登录态：尝试复用前台用户登录（管理员账号前台登录过 → 免二次登录）
+      const synced = await adminStore.syncFromUserSession()
+      if (!synced) {
+        router.push('/admin/login')
+        return
+      }
     }
     const isValid = await adminStore.checkTokenValidity()
     if (!isValid) {
-      showMessage('登录已过期，请重新登录', 'error')
-      router.push('/admin/login')
-    } else {
-      localLoginSuccess.value = true
-      loadAuditBadge()
-      auditBadgeTimer = setInterval(loadAuditBadge, 60000)
+      // token 失效：再试一次前台同步（可能是刚过期，前台仍在线）
+      const resynced = await adminStore.syncFromUserSession()
+      if (!resynced) {
+        showMessage('登录已过期，请重新登录', 'error')
+        router.push('/admin/login')
+        return
+      }
     }
+    localLoginSuccess.value = true
+    loadAuditBadge()
+    auditBadgeTimer = setInterval(loadAuditBadge, 60000)
     setupMobileWatcher()
   } catch (error) {
     console.error('初始化失败:', error)

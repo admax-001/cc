@@ -34,15 +34,16 @@ CREATE INDEX IF NOT EXISTS idx_collections_post ON collections(post_id);
 
 -- ---- 通知（type：1-点赞，2-评论/回复，3-关注）----
 CREATE TABLE IF NOT EXISTS notifications (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id    INTEGER NOT NULL REFERENCES users(id),
-  sender_id  INTEGER NOT NULL REFERENCES users(id),
-  type       INTEGER NOT NULL,
-  title      TEXT NOT NULL,
-  content    TEXT,
-  target_id  INTEGER,
-  is_read    INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id           INTEGER NOT NULL REFERENCES users(id),
+  sender_id         INTEGER NOT NULL REFERENCES users(id),
+  type              INTEGER NOT NULL,
+  title             TEXT NOT NULL,
+  content           TEXT,
+  target_id         INTEGER,
+  target_comment_id INTEGER,
+  is_read           INTEGER NOT NULL DEFAULT 0,
+  created_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON notifications(user_id, is_read);
 

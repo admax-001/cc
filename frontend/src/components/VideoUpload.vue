@@ -64,6 +64,17 @@
       {{ error }}
     </div>
 
+    <!-- 视频链接上传：粘贴直链直接采用（图床/本地文件之外的第三种方式） -->
+    <div v-if="!videoData && !isUploading" class="url-upload-row">
+      <input v-model="urlInput" type="url" class="url-input" placeholder="粘贴视频链接（https://...mp4）直接使用"
+        @keyup.enter="useVideoUrl" />
+      <button class="url-add-btn" :disabled="!urlInput.trim()" @click="useVideoUrl">使用</button>
+    </div>
+    <!-- 已用链接模式的视频，可清除重选 -->
+    <div v-else-if="videoData && videoData.fromUrl" class="url-upload-row">
+      <div class="url-set-text">已使用视频链接 · <a class="url-clear" @click.prevent="clearUrlVideo">清除</a></div>
+    </div>
+
     <div class="upload-tips">
       <p>• 支持 MP4、MOV、AVI 格式</p>
       <p>• 文件大小不超过{{ formatFileSize(apiConfig.upload.video.maxFileSize) }}</p>
@@ -150,6 +161,41 @@ const triggerFileInput = () => {
   if (fileInput.value) {
     fileInput.value.click()
   }
+}
+
+// ---------- 视频链接直用模式 ----------
+const urlInput = ref('')
+const useVideoUrl = () => {
+  const url = urlInput.value.trim()
+  if (!url) return
+  const u = /^https?:\/\//i.test(url) ? url : `https://${url}`
+  if (!/\.(mp4|mov|avi|webm|m4v|mkv|flv)(\?|#|$)/i.test(u)) {
+    toastMessage.value = '请输入有效的视频直链（以 .mp4 等结尾）'
+    toastType.value = 'error'
+    showToast.value = true
+    setTimeout(() => { showToast.value = false }, 2200)
+    return
+  }
+  videoData.value = {
+    preview: u,
+    url: u,
+    coverUrl: '',
+    thumbnailDataUrl: '',
+    uploaded: true,
+    fromUrl: true,
+    name: u.split('/').pop() || 'video.mp4',
+    size: 0
+  }
+  urlInput.value = ''
+  emit('change', videoData.value)
+  toastMessage.value = '已采用视频链接'
+  toastType.value = 'success'
+  showToast.value = true
+  setTimeout(() => { showToast.value = false }, 1800)
+}
+const clearUrlVideo = () => {
+  videoData.value = null
+  emit('change', null)
 }
 
 // 触发封面图片选择
@@ -465,6 +511,57 @@ defineExpose({
 </script>
 
 <style scoped>
+/* 视频链接直用行 */
+.url-upload-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  align-items: center;
+}
+
+.video-upload .url-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color-primary);
+  border-radius: 8px;
+  background: var(--bg-color-secondary);
+  color: var(--text-color-primary);
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.video-upload .url-input:focus {
+  border-color: var(--primary-color, #4fc08d);
+}
+
+.video-upload .url-add-btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 8px;
+  background: var(--primary-color, #4fc08d);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.video-upload .url-add-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.video-upload .url-set-text {
+  font-size: 13px;
+  color: var(--text-color-secondary);
+}
+
+.video-upload .url-clear {
+  color: var(--primary-color, #4fc08d);
+  cursor: pointer;
+}
+
 .video-upload {
   width: 100%;
 }

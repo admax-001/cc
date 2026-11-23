@@ -715,6 +715,53 @@ app.post('/api/auth/admin/refresh', requireAuth, async (c) => {
   return c.json(ok({ tokens: { access_token: token, refresh_token: token, expiresIn: exp } }, '已刷新'))
 })
 
+// ---------- 编辑个人资料（仅本人；:userId 兼容自增 id 与文本账号）----------
+app.put('/api/users/:userId', requireAuth, async (c) => {
+  const uid = c.get('auth').uid
+  const key = String(c.req.param('userId'))
+  // 路径参数必须指向本人（支持 id 或 user_id 两种写法）
+  const me = await c.env.DB.prepare('SELECT id, user_id FROM users WHERE id = ?').bind(uid).first()
+  if (!me) return fail(404, '用户不存在', 404)
+  if (String(me.id) !== key && me.user_id !== key) return fail(403, '只能编辑自己的资料', 403)
+
+  const b = await c.req.json().catch(() => ({}))
+  // 可编辑字段白名单与限制（与 users 表列对齐）
+  const fields = {}
+  if (b.nickname != null) {
+    const v = String(b.nickname).trim()
+    if (!v || v.length > 30) return fail(400, '昵称必填且不超过 30 字', 400)
+    fields.nickname = v
+  }
+  if (b.bio != null) fields.bio = String(b.bio).slice(0, 200)
+  if (b.gender != null) fields.gender = ['male', 'female', 'secret'].includes(String(b.gender)) ? String(b.gender) : 'secret'
+  if (b.mbti != null) fields.mbti = /^[A-Za-z]{0,4}$/.test(String(b.mbti).trim()) ? String(b.mbti).trim().toUpperCase() : ''
+  if (b.avatar != null) {
+    const v = String(b.avatar).trim()
+    if (v && !/^https?:\/\//.test(v)) return fail(400, '头像必须是 http(s) 链接', 400)
+    fields.avatar = v || null
+  }
+  if (b.email != null) {
+    const v = String(b.email).trim()
+    if (v && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return fail(400, '邮箱格式不正确', 400)
+    fields.email = v || null
+  }
+  if (b.location != null) fields.location = String(b.location).slice(0, 50) || null
+  if (b.zodiac_sign != null) fields.zodiac_sign = String(b.zodiac_sign).slice(0, 20) || null
+  if (b.education != null) fields.education = String(b.education).slice(0, 30) || null
+  if (b.major != null) fields.major = String(b.major).slice(0, 50) || null
+
+  const keys = Object.keys(fields)
+  if (keys.length === 0) return fail(400, '没有可更新的字段', 400)
+  await c.env.DB.prepare(
+    `UPDATE users SET ${keys.map(k => `${k} = ?`).join(', ')} WHERE id = ?`
+  ).bind(...keys.map(k => fields[k]), uid).run()
+
+  const row = await c.env.DB.prepare(
+    'SELECT id, user_id, nickname, avatar, bio, gender, mbti, email, location, zodiac_sign, education, major, verified, follow_count, fans_count, like_count, created_at FROM users WHERE id = ?'
+  ).bind(uid).first()
+  return c.json(ok(row, '资料已更新'))
+})
+
 // ---------- 修改密码（兼容前端 PUT /users/:userId/password 路径）----------
 const changePasswordHandler = async (c) => {
   const { old_password, new_password } = await c.req.json().catch(() => ({}))
@@ -1022,13 +1069,17 @@ app.delete('/api/posts/:id/collect', requireAuth, async (c) => {
   return c.json(ok({ collected: false, collect_count: cnt ? cnt.collect_count : 0 }, '已取消收藏'))
 })
 
-// ---------- 关注 / 取消关注 ----------
+// ---------- 关注 / 取消关注（:id 兼容自增 id 与文本账号，前端实际传 user_id 文本）----------
+const resolveFollowTarget = async (env, key) =>
+  env.DB.prepare('SELECT id, user_id, nickname, fans_count FROM users WHERE id = ? OR user_id = ?').bind(num(key, -1), key).first()
+
 app.post('/api/users/:id/follow', requireAuth, async (c) => {
-  const targetId = num(c.req.param('id'), 0)
+  const key = String(c.req.param('id'))
   const uid = c.get('auth').uid
-  if (targetId === uid) return fail(400, '不能关注自己', 400)
-  const target = await c.env.DB.prepare('SELECT id, user_id, nickname FROM users WHERE id = ?').bind(targetId).first()
+  const target = await resolveFollowTarget(c.env, key)
   if (!target) return fail(404, '用户不存在', 404)
+  const targetId = target.id
+  if (targetId === uid) return fail(400, '不能关注自己', 400)
 
   const r = await c.env.DB.prepare('INSERT OR IGNORE INTO follows (follower_id, following_id) VALUES (?, ?)').bind(uid, targetId).run()
   if (!r.meta?.changes) return c.json(ok({ following: true, fans_count: target.fans_count || 0 }, '已关注'))
@@ -1040,8 +1091,11 @@ app.post('/api/users/:id/follow', requireAuth, async (c) => {
 })
 
 app.delete('/api/users/:id/follow', requireAuth, async (c) => {
-  const targetId = num(c.req.param('id'), 0)
+  const key = String(c.req.param('id'))
   const uid = c.get('auth').uid
+  const target = await resolveFollowTarget(c.env, key)
+  if (!target) return fail(404, '用户不存在', 404)
+  const targetId = target.id
   const r = await c.env.DB.prepare('DELETE FROM follows WHERE follower_id = ? AND following_id = ?').bind(uid, targetId).run()
   if (r.meta?.changes) {
     await c.env.DB.prepare('UPDATE users SET follow_count = MAX(0, follow_count - 1) WHERE id = ?').bind(uid).run()
@@ -1066,7 +1120,7 @@ app.post('/api/comments', requireAuth, async (c) => {
   ).bind(pid, uid, text).run()
   const cid = r.meta?.last_row_id
   await c.env.DB.prepare('UPDATE posts SET comment_count = comment_count + 1 WHERE id = ?').bind(pid).run()
-  await notify(c.env, { userId: post.user_id, senderId: uid, type: 2, title: '评论了你的笔记', content: text.slice(0, 50), targetId: pid })
+  await notify(c.env, { userId: post.user_id, senderId: uid, type: 2, title: '评论了你的笔记', content: text.slice(0, 50), targetId: pid, targetCommentId: cid })
 
   const cm = await c.env.DB.prepare(
     `SELECT cm.id, cm.post_id, cm.content, cm.created_at, u.id AS author_auto_id, u.user_id AS author_account, u.nickname, u.avatar AS user_avatar
@@ -1095,15 +1149,33 @@ async function listNotifications(c, typeFilter) {
     `SELECT COUNT(*) AS total FROM notifications n ${where}`
   ).bind(...bind.slice(0, typeFilter ? 2 : 1)).all()).results
   const { results } = await c.env.DB.prepare(
-    `SELECT n.id, n.type, n.title, n.content, n.target_id, n.is_read, n.created_at,
-            s.id AS sender_auto_id, s.user_id AS sender_account, s.nickname AS sender_nickname, s.avatar AS sender_avatar
-       FROM notifications n LEFT JOIN users s ON n.sender_id = s.id
+    `SELECT n.id, n.type, n.title, n.content, n.target_id, n.target_comment_id, n.is_read, n.created_at,
+            s.id AS sender_auto_id, s.user_id AS sender_account, s.nickname AS sender_nickname, s.avatar AS sender_avatar, s.verified AS sender_verified,
+            p.user_id AS post_author_id,
+            (SELECT pi.url FROM post_images pi WHERE pi.post_id = n.target_id ORDER BY pi.sort LIMIT 1) AS post_image
+       FROM notifications n
+       LEFT JOIN users s ON n.sender_id = s.id
+       LEFT JOIN posts p ON p.id = n.target_id
        ${where} ORDER BY n.created_at DESC, n.id DESC LIMIT ? OFFSET ?`
   ).bind(...bind).all()
+  // 通知项对齐前端消息页契约（扁平字段 + sender 嵌套兼容）
   return c.json(ok({
     notifications: results.map(n => ({
       id: n.id, type: n.type, title: n.title, content: n.content, target_id: n.target_id,
-      is_read: !!n.is_read, created_at: n.created_at,
+      is_read: n.is_read, created_at: n.created_at,
+      // 扁平契约（消息页直接取这些字段）
+      from_user_id: n.sender_account || '',
+      from_user_auto_id: n.sender_auto_id || null,
+      from_nickname: n.sender_nickname || '未知用户',
+      from_avatar: n.sender_avatar || '',
+      from_verified: n.sender_verified || 0,
+      post_image: n.post_image || '',
+      post_author_id: n.post_author_id || null,
+      target_type: n.type === 2 ? 2 : 1, // 1-笔记 2-评论（点赞 type=1 视为笔记）
+      comment_id: n.target_comment_id || null,
+      comment_is_liked: 0,
+      comment_like_count: 0,
+      // 嵌套兼容（旧结构保留）
       sender: { id: n.sender_auto_id, user_id: n.sender_account, nickname: n.sender_nickname, avatar: n.sender_avatar }
     })),
     pagination: { page, limit, total: cnt.total, pages: Math.ceil(cnt.total / limit) }

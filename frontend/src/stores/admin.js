@@ -109,16 +109,14 @@ export const useAdminStore = defineStore('admin', () => {
   // 获取当前管理员信息
   const getCurrentAdmin = async () => {
     try {
-      if (!token.value) {
-        throw new Error('未登录')
-      }
-
+      // token 为空时也允许探测：用户在前台已登录（hxs_token cookie）且是管理员时,
+      // /api/auth/admin/me 会通过 cookie 鉴权成功 —— 实现"前台登录过，进后台免登录"
       const response = await adminApi.getCurrentAdmin()
 
       if (response.success && response.data) {
-        admin.value = response.data
+        admin.value = response.data.admin || response.data
         localStorage.setItem('admin_info', JSON.stringify(admin.value))
-        return { success: true, data: response.data }
+        return { success: true, data: response.data.admin || response.data }
       } else {
         throw new Error(response.message || '获取管理员信息失败')
       }
@@ -133,9 +131,9 @@ export const useAdminStore = defineStore('admin', () => {
           try {
             const newResponse = await adminApi.getCurrentAdmin()
             if (newResponse.success && newResponse.data) {
-              admin.value = newResponse.data
+              admin.value = newResponse.data.admin || newResponse.data
               localStorage.setItem('admin_info', JSON.stringify(admin.value))
-              return { success: true, data: newResponse.data }
+              return { success: true, data: newResponse.data.admin || newResponse.data }
             } else {
               throw new Error(newResponse.message || '获取管理员信息失败')
             }
@@ -168,6 +166,34 @@ export const useAdminStore = defineStore('admin', () => {
     }
   }
 
+  // 从前台用户会话恢复管理员登录态（前台登录 + is_admin=1 → 后台免登录）
+  // 原理：管理员账号体系与用户账号同源（同一种 JWT 与 cookie），
+  // /api/auth/admin/me 在无 admin_token 时走 hxs_token cookie 鉴权即可通过
+  const syncFromUserSession = async () => {
+    if (token.value || admin.value) return true // 已有管理员态，无需同步
+    const userToken = localStorage.getItem('token')
+    if (!userToken) return false
+    try {
+      // 用户已在前台登录：用同 token 身份探测是否管理员
+      localStorage.setItem('admin_token', userToken)
+      const result = await getCurrentAdmin()
+      if (result.success && result.data?.admin) {
+        token.value = userToken
+        refreshToken.value = userToken
+        admin.value = result.data.admin
+        localStorage.setItem('admin_refresh_token', userToken)
+        localStorage.setItem('admin_info', JSON.stringify(admin.value))
+        return true
+      }
+      // 不是管理员：清理探测痕迹，避免污染 admin 状态
+      localStorage.removeItem('admin_token')
+      return false
+    } catch (error) {
+      localStorage.removeItem('admin_token')
+      return false
+    }
+  }
+
   // 检查token有效性
   const checkTokenValidity = async () => {
     if (!token.value) return false
@@ -192,6 +218,7 @@ export const useAdminStore = defineStore('admin', () => {
     // 方法
     login,
     logout,
+    syncFromUserSession,
     refreshTokens,
     getCurrentAdmin,
     initializeAdmin,

@@ -124,12 +124,13 @@ function readCookie(c, name) {
 }
 
 // ---------- 通知生成（写操作联动，失败不阻塞主流程）----------
-export async function notify(env, { userId, senderId, type, title, content, targetId }) {
+// targetCommentId：评论类通知携带评论 id（前端用于定位/跳转到该评论），可空
+export async function notify(env, { userId, senderId, type, title, content, targetId, targetCommentId }) {
   if (userId === senderId) return // 自己的操作不给自己发通知
   try {
     await env.DB.prepare(
-      'INSERT INTO notifications (user_id, sender_id, type, title, content, target_id) VALUES (?, ?, ?, ?, ?, ?)'
-    ).bind(userId, senderId, type, title, content || '', targetId || null).run()
+      'INSERT INTO notifications (user_id, sender_id, type, title, content, target_id, target_comment_id) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).bind(userId, senderId, type, title, content || '', targetId || null, targetCommentId || null).run()
   } catch (e) {
     console.error('notify failed:', e && e.message)
   }

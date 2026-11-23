@@ -250,6 +250,17 @@ if (!mig4.ok) {
   T('  √ 视频字段迁移完成（posts.video_url / cover_url）')
 }
 
+// 5.6 V3 迁移：通知表加评论定位列（notifications.target_comment_id）
+T('\n[5/8] V3 迁移 migrations/005-notification-comment.sql ...')
+const mig5 = wr(['d1', 'execute', DB_NAME, '--remote', '--file=migrations/005-notification-comment.sql', '-y'])
+if (!mig5.ok) {
+  if (/duplicate column/i.test(mig5.out)) {
+    T('  √ 列已存在（幂等跳过）')
+  } else { T('  × 失败：\n' + mig5.out); process.exit(1) }
+} else {
+  T('  √ 通知评论定位列完成（notifications.target_comment_id）')
+}
+
 // 6. 种子数据：仅当库中无用户时导入（已有用户 → 跳过，保护已注册账号与首个管理员不被重置）
 T('\n[6/8] 导入种子数据 seed.sql（已有用户则跳过保护）...')
 const cntOut = wr(['d1', 'execute', DB_NAME, '--remote', '--command', 'SELECT COUNT(*) AS n FROM users', '--json'])
@@ -370,6 +381,18 @@ if (!secList.ok) {
     T('  × 自动注入失败：' + putOut.slice(-200))
     T('  请手动执行：npx wrangler secret put JWT_SECRET（设置前登录/注册不可用）')
     process.exit(1)
+  }
+}
+
+// 10. 图床 token 提示：IMG_API_TOKEN 未设置时，图片走占位图、视频上传直接报错
+T('\n[提示] 检查图床 IMG_API_TOKEN ...')
+if (secList && secList.ok) {
+  if (!/IMG_API_TOKEN/i.test(secList.out)) {
+    T('  ~ 未检测到 IMG_API_TOKEN secret：图片上传将退回 picsum 占位图（随机图），视频上传会报错')
+    T('  图库后台"管理→API令牌"生成后执行（或控制台 Variables and Secrets 添加）：')
+    T(`      npx wrangler secret put IMG_API_TOKEN --name ${ACTUAL_WORKER}`)
+  } else {
+    T('  √ IMG_API_TOKEN 已配置（图片/视频直存图库）')
   }
 }
 
