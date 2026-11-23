@@ -225,6 +225,17 @@ if (!mig3.ok) {
   T('  √ 管理侧表迁移完成（user_ban / audit / reports）')
 }
 
+// 5.5 V3 迁移：视频笔记字段（posts 加 video_url / cover_url）
+T('\n[5/8] V3 迁移 migrations/004-video-columns.sql ...')
+const mig4 = wr(['d1', 'execute', DB_NAME, '--remote', '--file=migrations/004-video-columns.sql', '-y'])
+if (!mig4.ok) {
+  if (/duplicate column/i.test(mig4.out)) {
+    T('  √ 列已存在（幂等跳过）')
+  } else { T('  × 失败：\n' + mig4.out); process.exit(1) }
+} else {
+  T('  √ 视频字段迁移完成（posts.video_url / cover_url）')
+}
+
 // 6. 种子数据：仅当库中无用户时导入（已有用户 → 跳过，保护已注册账号与首个管理员不被重置）
 T('\n[6/8] 导入种子数据 seed.sql（50 用户/200 笔记/800 评论）...')
 const cntOut = wr(['d1', 'execute', DB_NAME, '--remote', '--command', 'SELECT COUNT(*) AS n FROM users', '--json'])

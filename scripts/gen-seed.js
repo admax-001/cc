@@ -4,6 +4,7 @@
 // 用法：node scripts/gen-seed.js
 import fs from 'node:fs'
 import path from 'node:path'
+import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -84,7 +85,8 @@ lines.push('-- 黑小帅 V1 种子数据（自动生成，勿手改）')
 lines.push('-- 生成时间: ' + new Date().toISOString())
 // 注意：Cloudflare D1 不支持 BEGIN TRANSACTION / SAVEPOINT / PRAGMA，
 // wrangler d1 execute --file 本身就是原子导入（失败自动回滚），无需显式事务包裹
-lines.push('DELETE FROM comments; DELETE FROM post_tags; DELETE FROM post_images; DELETE FROM posts; DELETE FROM users; DELETE FROM tags; DELETE FROM categories;')
+// 外键依赖：comments/post_tags/post_images/likes/collections/follows/notifications/user_ban/reports → posts/users，先删子表再删父表
+lines.push('DELETE FROM comments; DELETE FROM post_tags; DELETE FROM post_images; DELETE FROM likes; DELETE FROM collections; DELETE FROM follows; DELETE FROM notifications; DELETE FROM posts; DELETE FROM tags; DELETE FROM categories; DELETE FROM user_sessions; DELETE FROM user_ban; DELETE FROM reports; DELETE FROM audit; DELETE FROM users;')
 lines.push("DELETE FROM sqlite_sequence WHERE name IN ('categories','tags','users','posts','post_images','comments');")
 
 // 分类
@@ -94,19 +96,27 @@ CATEGORIES.forEach(([name, title], i) => lines.push(`INSERT INTO categories (id,
 const tags = TAG_POOL
 tags.forEach((name, i) => lines.push(`INSERT INTO tags (id, name, use_count) VALUES (${i + 1}, '${esc(name)}', ${int(1, 9)});`))
 
-// 用户（50）
-NICKS.forEach((nick, i) => {
-  lines.push(`INSERT INTO users (id, user_id, nickname, avatar, bio, gender, mbti, created_at) VALUES (${i + 1}, 'user${String(i + 1).padStart(3, '0')}', '${esc(nick)}', '${pick(AVATARS)}', '${esc(pick(BIOS))}', '${pick(['male', 'female', 'secret'])}', '${pick(MBTIS)}', '${ts(int(60, 200))}');`)
+// 用户（8 个特定数字账号，密码统一 12345678，PBKDF2 哈希与 src/auth.js 同格式）
+const ACCOUNTS = Array.from({ length: 8 }, (_, i) => String(10000001 + i)) // 10000001 ~ 10000008
+const PASSWORD = '12345678'
+const ITER = 100000
+const hashPasswordSync = (password) => {
+  const salt = crypto.randomBytes(16)
+  const key = crypto.pbkdf2Sync(password, salt, ITER, 32, 'sha256')
+  return ['pbkdf2', ITER, salt.toString('base64'), key.toString('base64')].join('$')
+}
+ACCOUNTS.forEach((acc, i) => {
+  lines.push(`INSERT INTO users (id, user_id, nickname, avatar, bio, gender, mbti, password_hash, created_at) VALUES (${i + 1}, '${acc}', '${esc(NICKS[i])}', '${pick(AVATARS)}', '${esc(pick(BIOS))}', '${pick(['male', 'female', 'secret'])}', '${pick(MBTIS)}', '${hashPasswordSync(PASSWORD)}', '${ts(int(60, 200))}');`)
 })
 
-// 笔记（200）+ 图（1~6 张/篇）+ 标签关联（2~4 个/篇）
+// 笔记（150）+ 图（1~6 张/篇）+ 标签关联（2~4 个/篇）
 let imgSeq = 0, tagUse = {}
-for (let i = 1; i <= 200; i++) {
+for (let i = 1; i <= 150; i++) {
   const catIdx = int(0, CATEGORIES.length - 1)
   const title = pick(TITLE_TMPL[catIdx])
   const content = pick(CONTENT_TMPL).replace('{tagline}', pick(TAGLINES))
   const daysAgo = int(0, 45), hh = int(8, 23), mm = int(0, 59)
-  lines.push(`INSERT INTO posts (id, user_id, title, content, category_id, location, view_count, like_count, comment_count, status, created_at) VALUES (${i}, ${int(1, 50)}, '${esc(title)}', '${esc(content)}', ${catIdx + 1}, '${pick(CITIES)}', ${int(5, 900)}, ${int(0, 80)}, ${int(0, 12)}, 0, '${ts(daysAgo, hh, mm)}');`)
+  lines.push(`INSERT INTO posts (id, user_id, title, content, category_id, location, view_count, like_count, comment_count, status, created_at) VALUES (${i}, ${int(1, 8)}, '${esc(title)}', '${esc(content)}', ${catIdx + 1}, '${pick(CITIES)}', ${int(5, 900)}, ${int(0, 80)}, ${int(0, 12)}, 0, '${ts(daysAgo, hh, mm)}');`)
   const nImg = int(1, 6)
   for (let s = 0; s < nImg; s++) {
     imgSeq++
@@ -125,11 +135,11 @@ for (let i = 1; i <= 200; i++) {
 // 更新标签真实使用量
 Object.entries(tagUse).forEach(([tid, n]) => lines.push(`UPDATE tags SET use_count = ${n} WHERE id = ${tid};`))
 
-// 评论（800，分布到前 150 篇）
-for (let i = 0; i < 800; i++) {
-  lines.push(`INSERT INTO comments (id, post_id, user_id, content, created_at) VALUES (${i + 1}, ${int(1, 150)}, ${int(1, 50)}, '${esc(pick(COMMENT_TMPL))}', '${ts(int(0, 40), int(8, 23), int(0, 59))}');`)
+// 评论（600，分布到前 120 篇）
+for (let i = 0; i < 600; i++) {
+  lines.push(`INSERT INTO comments (id, post_id, user_id, content, created_at) VALUES (${i + 1}, ${int(1, 120)}, ${int(1, 8)}, '${esc(pick(COMMENT_TMPL))}', '${ts(int(0, 40), int(8, 23), int(0, 59))}');`)
 }
 
 fs.writeFileSync(out, lines.join('\n'), 'utf8')
 console.log(`seed.sql 已生成 -> ${out}`)
-console.log(`分类 ${CATEGORIES.length} / 标签 ${tags.length} / 用户 ${NICKS.length} / 笔记 200 / 图片 ${imgSeq} / 评论 800`)
+console.log(`账号 ${ACCOUNTS.length}（${ACCOUNTS[0]}~${ACCOUNTS[ACCOUNTS.length - 1]}，密码 ${PASSWORD}）/ 分类 ${CATEGORIES.length} / 标签 ${tags.length} / 笔记 150 / 图片 ${imgSeq} / 评论 600`)

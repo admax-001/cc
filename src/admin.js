@@ -82,9 +82,9 @@ admin.get('/monitor/activities', async (c) => {
   ).bind(limit).all()
   for (const r of (p.results || [])) acts.push({ id: `p${r.id}`, type: 'post_publish', post_id: r.id, user_id: r.user_id, nickname: r.nickname, avatar: r.avatar, created_at: r.created_at, description: `发布了笔记《${r.title}》` })
   const cm = await c.env.DB.prepare(
-    'SELECT cm.id, cm.content, cm.created_at, u.user_id, u.nickname, u.avatar FROM comments cm LEFT JOIN users u ON cm.user_id = u.id ORDER BY cm.created_at DESC, cm.id DESC LIMIT ?'
+    'SELECT cm.id, cm.post_id, cm.content, cm.created_at, u.user_id, u.nickname, u.avatar FROM comments cm LEFT JOIN users u ON cm.user_id = u.id ORDER BY cm.created_at DESC, cm.id DESC LIMIT ?'
   ).bind(limit).all()
-  for (const r of (cm.results || [])) acts.push({ id: `c${r.id}`, type: 'comment_publish', comment_id: r.id, user_id: r.user_id, nickname: r.nickname, avatar: r.avatar, created_at: r.created_at, description: '发表了评论', content: (r.content || '').slice(0, 120) })
+  for (const r of (cm.results || [])) acts.push({ id: `c${r.id}`, type: 'comment_publish', post_id: r.post_id, target_id: r.post_id, comment_id: r.id, user_id: r.user_id, nickname: r.nickname, avatar: r.avatar, created_at: r.created_at, description: '发表了评论', content: (r.content || '').slice(0, 120) })
   acts.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
   return c.json(ok(acts.slice(0, limit)))
 })

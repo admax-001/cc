@@ -141,7 +141,8 @@ const handleActivityClick = (activity) => {
     const url = `${window.location.origin}/post?id=${activity.target_id}`
     window.open(url, '_blank')
   } else if (activity.type === 'comment_publish') {
-    const url = `${window.location.origin}/post?id=${activity.target_id}&targetCommentId=${activity.id}`
+    // 定位到源笔记并滚动到评论：post_id 是笔记 id，comment_id 是纯数字评论 id
+    const url = `${window.location.origin}/post?id=${activity.post_id}&targetCommentId=${activity.comment_id}`
     window.open(url, '_blank')
   }
 }

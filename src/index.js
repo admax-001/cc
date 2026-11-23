@@ -36,7 +36,7 @@ const clearCookie = (c) => {
 
 // 列表/详情共用的帖子字段（对齐原前端 transformPostData）
 const POST_FIELDS = `
-  p.id, p.title, p.content, p.location, p.view_count, p.like_count, p.comment_count,
+  p.id, p.title, p.content, p.location, p.video_url, p.cover_url, p.view_count, p.like_count, p.comment_count,
   p.status, p.created_at,
   u.id AS author_auto_id, u.user_id AS author_account, u.nickname, u.avatar AS user_avatar,
   u.bio AS author_bio, u.mbti AS author_mbti,
@@ -62,7 +62,10 @@ const toFrontPost = (r) => ({
   verified: 0,
   created_at: r.created_at,
   category: r.category || '',
-  type: 1,
+  type: r.video_url ? 2 : 1,
+  video: r.video_url ? { url: r.video_url, coverUrl: r.cover_url || null } : null,
+  video_url: r.video_url || null,
+  cover_url: r.cover_url || null,
   status: r.status,
   user_id: r.author_account || '',
   author_auto_id: r.author_auto_id,
@@ -106,21 +109,47 @@ app.get('/api/health', (c) => c.json(ok({ status: 'ok', version: c.env.APP_VERSI
 // 原前端 channels.js 用 category.category_title 作为路由路径
 app.get('/api/categories', async (c) => {
   const { results } = await c.env.DB.prepare('SELECT id, name, title, category_title FROM categories ORDER BY id').all()
+  // 分类变动极少，边缘缓存 5 分钟
+  c.header('Cache-Control', 'public, s-maxage=300, stale-while-revalidate=600')
   return c.json(ok(results))
 })
 
 // ---------- 笔记分页（瀑布流） ----------
-// GET /api/posts?page=1&limit=20&category=<name|id>
-app.get('/api/posts', async (c) => {
+// GET /api/posts?page=1&limit=20&category=<name|id>&status=0|1&user_id=<auto_id>&keyword=<搜索词>
+// status=1（草稿）需登录且仅返回本人草稿（账号隔离）；status=0 为公开已发布
+app.get('/api/posts', optionalAuth, async (c) => {
   const { page, limit, offset } = pager(c)
   const category = c.req.query('category') || ''
+  const statusQ = c.req.query('status')
 
-  let where = ' WHERE p.status = 0'
+  // 草稿态：必须登录，且强制只能看自己的（忽略前端传的 user_id，防越权）
+  let draftUid = null
+  if (statusQ === '1') {
+    const auth = c.get('auth')
+    if (!auth || !auth.uid) return fail(401, '请先登录', 401)
+    draftUid = auth.uid
+  }
+
+  let where = statusQ === '1' ? ' WHERE p.status = 1 AND p.user_id = ?' : ' WHERE p.status = 0'
   const params = []
+  if (statusQ === '1') params.push(draftUid)
   // 对齐原版：recommend / general 为特殊频道值，不按分类过滤
   if (category && category !== 'recommend' && category !== 'general') {
     where += ' AND (c.name = ? OR CAST(c.id AS TEXT) = ? OR c.category_title = ?)'
     params.push(category, category, category)
+  }
+  // 草稿/个人主页：按作者过滤（仅公开态允许；草稿态强制本人已处理）
+  const userQ = c.req.query('user_id')
+  if (statusQ !== '1' && userQ && /^\d+$/.test(userQ)) {
+    where += ' AND p.user_id = ?'
+    params.push(num(userQ, 0))
+  }
+  // 关键词搜索（标题/正文）
+  const keyword = (c.req.query('keyword') || '').trim()
+  if (keyword) {
+    where += ' AND (p.title LIKE ? OR p.content LIKE ?)'
+    const kw = `%${keyword.replace(/[%_]/g, (m) => '\\' + m)}%`
+    params.push(kw, kw)
   }
 
   const [countRow] = (await c.env.DB.prepare(
@@ -137,6 +166,12 @@ app.get('/api/posts', async (c) => {
        LIMIT ? OFFSET ?`
   ).bind(...params, limit, offset).all()
 
+  // 仅公开列表加边缘短缓存（60s 新鲜 + 5min 过期可用）；草稿列表绝不缓存
+  if (statusQ !== '1') {
+    c.header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  } else {
+    c.header('Cache-Control', 'private, no-store')
+  }
   return c.json(ok({
     posts: results.map(toFrontPost),
     pagination: { page, limit, total, pages: Math.ceil(total / limit) },
@@ -145,7 +180,7 @@ app.get('/api/posts', async (c) => {
 })
 
 // ---------- 笔记详情 ----------
-app.get('/api/posts/:id', async (c) => {
+app.get('/api/posts/:id', optionalAuth, async (c) => {
   const id = num(c.req.param('id'), 0)
   if (id <= 0) return fail(400, '参数错误', 400)
   const skipView = c.req.query('skipViewCount') === 'true'
@@ -155,11 +190,16 @@ app.get('/api/posts/:id', async (c) => {
        FROM posts p
        LEFT JOIN users u ON p.user_id = u.id
        LEFT JOIN categories c ON p.category_id = c.id
-       WHERE p.id = ? AND p.status = 0`
+      WHERE p.id = ?`
   ).bind(id).all()
   if (!results || results.length === 0) return fail(404, '笔记不存在', 404)
   const p = results[0]
-  if (!skipView) {
+  // 草稿（status=1）仅作者本人可看：未登录或非本人一律 404（不泄露存在性）
+  if (p.status === 1) {
+    const auth = c.get('auth')
+    if (!auth || !auth.uid || auth.uid !== p.author_auto_id) return fail(404, '笔记不存在', 404)
+  }
+  if (!skipView && p.status === 0) {
     await c.env.DB.prepare('UPDATE posts SET view_count = view_count + 1 WHERE id = ?').bind(id).run()
     p.view_count = (p.view_count || 0) + 1
   }
@@ -386,7 +426,9 @@ app.get('/api/users/:userId/stats', async (c) => {
   return c.json(ok({
     post_count: s.post_count, comment_count: s.comment_count,
     collect_count: s.collect_count,
-    like_count: u.like_count, follow_count: u.follow_count, fans_count: u.fans_count
+    like_count: u.like_count, follow_count: u.follow_count, fans_count: u.fans_count,
+    // 兼容字段：个人主页"获赞与收藏"合计（旧字段名 likes_and_collects）
+    likes_and_collects: (u.like_count || 0) + (s.collect_count || 0)
   }))
 })
 
@@ -713,9 +755,18 @@ app.post('/api/posts', requireAuth, async (c) => {
   const uid = c.get('auth').uid
   const title = String(b.title || '').trim()
   const content = String(b.content || '').trim()
-  if (!title || title.length > 100) return fail(400, '标题必填且不超过 100 字', 400)
-  if (!content) return fail(400, '正文不能为空', 400)
-  if (content.length > 5000) return fail(400, '正文不超过 5000 字', 400)
+  // 状态：1=草稿（存起来不公开）；2=待审核（无审核流，视同发布）；0/缺省=发布
+  const status = (b.status === 1 || b.status === '1') ? 1 : 0
+  if (status === 0) {
+    if (!title || title.length > 100) return fail(400, '标题必填且不超过 100 字', 400)
+    if (!content) return fail(400, '正文不能为空', 400)
+    if (content.length > 5000) return fail(400, '正文不超过 5000 字', 400)
+  } else {
+    // 草稿放宽：标题/正文至少一项非空；长度上限仍然生效
+    if (!title && !content) return fail(400, '标题和正文至少填写一项', 400)
+    if (title.length > 100) return fail(400, '标题不超过 100 字', 400)
+    if (content.length > 5000) return fail(400, '正文不超过 5000 字', 400)
+  }
 
   // 分类校验（可空 = 不归类）
   let categoryId = null
@@ -729,10 +780,17 @@ app.post('/api/posts', requireAuth, async (c) => {
   const images = Array.isArray(b.images) ? b.images.filter(u => /^https?:\/\//.test(String(u))).slice(0, 18) : []
   // 标签：字符串数组，最多 10 个，单个 ≤ 30 字；自动 upsert 计数
   const tags = Array.isArray(b.tags) ? b.tags.map(t => String(t).trim()).filter(t => t && t.length <= 30).slice(0, 10) : []
+  // 视频字段（视频笔记）：{url, coverUrl}
+  let videoUrl = null
+  let coverUrl = null
+  if (b.video && b.video.url && /^https?:\/\//.test(String(b.video.url))) {
+    videoUrl = String(b.video.url)
+    coverUrl = (b.video.coverUrl && /^https?:\/\//.test(String(b.video.coverUrl))) ? String(b.video.coverUrl) : null
+  }
 
   const r = await c.env.DB.prepare(
-    'INSERT INTO posts (user_id, title, content, category_id, location, status) VALUES (?, ?, ?, ?, ?, 0)'
-  ).bind(uid, title, content, categoryId, b.location ? String(b.location).slice(0, 50) : null).run()
+    'INSERT INTO posts (user_id, title, content, category_id, location, video_url, cover_url, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).bind(uid, title, content, categoryId, b.location ? String(b.location).slice(0, 50) : null, videoUrl, coverUrl, status).run()
   const pid = r.meta?.last_row_id
 
   for (let i = 0; i < images.length; i++) {
@@ -760,20 +818,117 @@ app.post('/api/posts', requireAuth, async (c) => {
 app.put('/api/posts/:id', requireAuth, async (c) => {
   const id = num(c.req.param('id'), 0)
   const uid = c.get('auth').uid
-  const row = await c.env.DB.prepare('SELECT id, user_id FROM posts WHERE id = ?').bind(id).first()
+  const row = await c.env.DB.prepare('SELECT id, user_id, title, content, status FROM posts WHERE id = ?').bind(id).first()
   if (!row) return fail(404, '笔记不存在', 404)
   if (row.user_id !== uid) return fail(403, '只能编辑自己发布的笔记', 403)
 
   const b = await c.req.json().catch(() => ({}))
   const title = b.title != null ? String(b.title).trim() : null
   const content = b.content != null ? String(b.content).trim() : null
-  if (title !== null && (!title || title.length > 100)) return fail(400, '标题必填且不超过 100 字', 400)
-  if (content !== null && (!content || content.length > 5000)) return fail(400, '正文不超过 5000 字', 400)
+  // 状态切换：status=1 存/保持草稿；status=0/2 发布（草稿箱点"发布"即转公开）
+  const updateStatus = b.status !== undefined
+  const newStatus = (b.status === 1 || b.status === '1') ? 1 : 0
+
+  // 发布校验：合并现有值与传入值，标题/正文必须完整、长度达标
+  const finalTitle = title !== null ? title : row.title
+  const finalContent = content !== null ? content : row.content
+  const finalStatus = updateStatus ? newStatus : row.status
+  if (finalStatus === 0) {
+    if (!finalTitle || finalTitle.length > 100) return fail(400, '发布需要标题（不超过 100 字）', 400)
+    if (!finalContent) return fail(400, '发布需要正文内容', 400)
+    if (finalContent.length > 5000) return fail(400, '正文不超过 5000 字', 400)
+  } else if (finalTitle.length > 100) {
+    return fail(400, '标题不超过 100 字', 400)
+  } else if (finalContent.length > 5000) {
+    return fail(400, '正文不超过 5000 字', 400)
+  }
+
+  // 分类校验（与发布接口对齐：传空 = 不归类）
+  let categoryId = null
+  const updateCategory = b.category_id !== undefined
+  if (updateCategory && b.category_id != null && b.category_id !== '') {
+    const cat = await c.env.DB.prepare('SELECT id FROM categories WHERE id = ?').bind(num(b.category_id, 0)).first()
+    if (!cat) return fail(400, '分类不存在', 400)
+    categoryId = cat.id
+  }
+
+  // 图片白名单（与发布接口对齐：http(s) URL，最多 18 张；传入即全量替换）
+  const updateImages = Array.isArray(b.images)
+  const images = updateImages ? b.images.filter(u => /^https?:\/\//.test(String(u))).slice(0, 18) : []
+  // 标签（与发布接口对齐：最多 10 个，单个 ≤ 30 字；传入即全量替换）
+  const updateTags = Array.isArray(b.tags)
+  const tags = updateTags ? b.tags.map(t => String(t).trim()).filter(t => t && t.length <= 30).slice(0, 10) : []
+  // 视频字段（视频笔记）：video 对象 {url, coverUrl} 或 null
+  let videoUrl = null
+  let coverUrl = null
+  if (b.video && b.video.url && /^https?:\/\//.test(String(b.video.url))) {
+    videoUrl = String(b.video.url)
+    coverUrl = (b.video.coverUrl && /^https?:\/\//.test(String(b.video.coverUrl))) ? String(b.video.coverUrl) : null
+  }
+  const updateVideo = b.video !== undefined
 
   await c.env.DB.prepare(
-    'UPDATE posts SET title = COALESCE(?, title), content = COALESCE(?, content), location = COALESCE(?, location) WHERE id = ?'
-  ).bind(title, content, b.location ? String(b.location).slice(0, 50) : null, id).run()
-  return c.json(ok({ id }, '笔记已更新'))
+    `UPDATE posts SET
+       title = COALESCE(?, title),
+       content = COALESCE(?, content),
+       location = COALESCE(?, location),
+       category_id = CASE WHEN ? THEN ? ELSE category_id END,
+       video_url = CASE WHEN ? THEN ? ELSE video_url END,
+       cover_url = CASE WHEN ? THEN ? ELSE cover_url END,
+       status = CASE WHEN ? THEN ? ELSE status END
+     WHERE id = ?`
+  ).bind(
+    title, content, b.location ? String(b.location).slice(0, 50) : null,
+    updateCategory ? 1 : 0, categoryId,
+    updateVideo ? 1 : 0, videoUrl,
+    updateVideo ? 1 : 0, coverUrl,
+    updateStatus ? 1 : 0, newStatus,
+    id
+  ).run()
+
+  // 全量替换图片
+  if (updateImages) {
+    await c.env.DB.prepare('DELETE FROM post_images WHERE post_id = ?').bind(id).run()
+    for (let i = 0; i < images.length; i++) {
+      await c.env.DB.prepare('INSERT INTO post_images (post_id, url, sort) VALUES (?, ?, ?)').bind(id, String(images[i]), i).run()
+    }
+  }
+
+  // 全量替换标签（新标签 upsert 计数，旧标签计数回退）
+  if (updateTags) {
+    const old = await c.env.DB.prepare(
+      'SELECT t.id, t.name FROM post_tags pt JOIN tags t ON pt.tag_id = t.id WHERE pt.post_id = ?'
+    ).bind(id).all()
+    const oldNames = new Set((old.results || []).map(r => r.name))
+    const newNames = new Set(tags)
+    for (const r of (old.results || [])) {
+      if (!newNames.has(r.name)) {
+        await c.env.DB.prepare('UPDATE tags SET use_count = MAX(0, use_count - 1) WHERE id = ?').bind(r.id).run()
+      }
+    }
+    await c.env.DB.prepare('DELETE FROM post_tags WHERE post_id = ?').bind(id).run()
+    for (const t of tags) {
+      await c.env.DB.prepare(
+        'INSERT INTO tags (name, use_count) VALUES (?, 1) ON CONFLICT(name) DO UPDATE SET use_count = use_count + 1'
+      ).bind(t).run()
+      const tagRow = await c.env.DB.prepare('SELECT id FROM tags WHERE name = ?').bind(t).first()
+      if (tagRow) await c.env.DB.prepare('INSERT OR IGNORE INTO post_tags (post_id, tag_id) VALUES (?, ?)').bind(id, tagRow.id).run()
+    }
+    // 清理计到 0 的标签（保持标签池干净）
+    await c.env.DB.prepare('DELETE FROM tags WHERE use_count <= 0').run()
+  }
+
+  // 返回完整详情（对齐 GET /api/posts/:id）
+  const detail = await c.env.DB.prepare(
+    `SELECT ${POST_FIELDS} FROM posts p LEFT JOIN users u ON p.user_id = u.id LEFT JOIN categories c ON p.category_id = c.id WHERE p.id = ?`
+  ).bind(id).first()
+  const post = toFrontPost(detail)
+  const tagRows = await c.env.DB.prepare(
+    'SELECT t.id, t.name FROM post_tags pt JOIN tags t ON pt.tag_id = t.id WHERE pt.post_id = ?'
+  ).bind(id).all()
+  post.tags = (tagRows.results || []).map(r => r.name)
+  post.tags_detail = (tagRows.results || []).map(r => ({ id: r.id, name: r.name }))
+  return c.json(ok(post, '笔记已更新'))
 })
 
 // ---------- 删除笔记（仅作者本人，级联清理图片/标签/评论/点赞/收藏）----------
@@ -1065,71 +1220,106 @@ app.notFound((c) => {
 })
 
 // ============================================================
-// Phase D · 图片上传（imgbed 直传为主 + picsum 兜底）
-// 前端契约：POST /upload/single（multipart file 字段）→ { data: { url } }
+// Phase D · 文件上传（imgbed 直传为主：图片 5MB / 视频 100MB）
+// 前端契约：
+//   POST /upload/single|image|multiple（file 字段）→ { data: { url } }
+//   POST /upload/video（file 字段 + 可选 thumbnail 字段）→ { data: { url, coverUrl } }
 // 策略（环境变量 IMAGE_UPLOAD_STRATEGY）：
 //   imgbed-api  —— 转发自建图床（IMG_API_URL + secret IMG_API_TOKEN），外链返回
-//   placeholder  —— 无图床配置时用 picsum 语义占位（保证发布流程可用）
+//   placeholder  —— 无图床配置时图片回退 picsum 占位（视频必须真实图床，直接报错）
 // ============================================================
+const parseImgbedUrl = (j, env, apiUrl) => {
+  let url = j && (j.data?.url || j.url || j.data?.[0]?.url)
+  if (!url && j && Array.isArray(j.data) && typeof j.data[0] === 'string') {
+    const p = j.data[0]
+    if (/^https?:\/\//i.test(p)) {
+      url = p
+    } else {
+      const base = (env.IMG_BASE_URL || apiUrl.replace(/\/upload.*$/, '')).trim().replace(/\/+$/, '')
+      url = `${base}${p.startsWith('/') ? '' : '/'}${p}`
+    }
+  }
+  return url || null
+}
+
+// 通用：单文件转发 imgbed（鉴权兼容：CF-ImgBed 标准裸 token，失败自动换 Bearer）
+const forwardToImgbed = async (env, file) => {
+  const apiUrl = (env.IMG_API_URL || '').trim()
+  const token = (env.IMG_API_TOKEN || '').trim()
+  if (!apiUrl || !token) return { url: null, reason: 'unconfigured' }
+  const authVariants = /^bearer\s/i.test(token) ? [token] : [token, `Bearer ${token}`]
+  for (const auth of [...new Set(authVariants)]) {
+    try {
+      const fwd = new FormData()
+      fwd.append('file', file, file.name || 'upload.bin')
+      const r = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { Authorization: auth },
+        body: fwd
+      })
+      const j = await r.json().catch(() => null)
+      const url = parseImgbedUrl(j, env, apiUrl)
+      if (r.ok && url) return { url, strategy: 'imgbed' }
+      console.error('imgbed 上传失败:', auth.replace(/(\S{8})\S*/, '$1***'), r.status, JSON.stringify(j).slice(0, 200))
+    } catch (e) {
+      console.error('imgbed 网络异常:', e && e.message)
+    }
+  }
+  return { url: null, reason: 'upload_failed' }
+}
+
 const uploadHandler = async (c) => {
   const uid = c.get('auth').uid
   const form = await c.req.formData().catch(() => null)
   const file = form && form.get('file')
   if (!file || typeof file === 'string') return fail(400, '请选择要上传的图片文件', 400)
   if (file.size > 5 * 1024 * 1024) return fail(400, '图片大小不能超过 5MB', 400)
-  if (!/^image\//.test(file.type || '')) return fail(400, '仅支持图片文件', 400)
+  if (!/^image\//.test(file.type || '')) return fail(400, '仅支持图片文件（视频请用 /upload/video）', 400)
 
   const strategy = (c.env.IMAGE_UPLOAD_STRATEGY || 'imgbed-api').trim()
-  const apiUrl = (c.env.IMG_API_URL || '').trim()
-  const token = (c.env.IMG_API_TOKEN || '').trim()
-
-  // ① imgbed 直传（已配置才走）
-  if (strategy === 'imgbed-api' && apiUrl && token) {
-    // 鉴权兼容：CF-ImgBed 系图床标准为 Authorization: <裸token>；
-    // 若 secret 里已带 "Bearer " 前缀则原样透传，否则先裸后 Bearer 各试一次
-    const authVariants = /^bearer\s/i.test(token)
-      ? [token]
-      : [token, `Bearer ${token}`]
-    for (const auth of [...new Set(authVariants)]) {
-      try {
-        const fwd = new FormData()
-        fwd.append('file', file, file.name || 'image.png')
-        const r = await fetch(apiUrl, {
-          method: 'POST',
-          headers: { Authorization: auth },
-          body: fwd
-        })
-        const j = await r.json().catch(() => null)
-        // 兼容两类响应格式：
-        //   对象式：{ data: { url } } / { url } / { data: [{ url }] }
-        //   CF-ImgBed 式：{ code: 200, data: ["/file/xxx.png"] }（相对路径数组，需拼 IMG_BASE_URL）
-        let url = j && (j.data?.url || j.url || j.data?.[0]?.url)
-        if (!url && j && Array.isArray(j.data) && typeof j.data[0] === 'string') {
-          const p = j.data[0]
-          if (/^https?:\/\//i.test(p)) {
-            url = p
-          } else {
-            const base = (c.env.IMG_BASE_URL || apiUrl.replace(/\/upload.*$/, '')).trim().replace(/\/+$/, '')
-            url = `${base}${p.startsWith('/') ? '' : '/'}${p}`
-          }
-        }
-        if (r.ok && url) {
-          return c.json(ok({ url, strategy: 'imgbed', by: uid, size: file.size, type: file.type }, '上传成功'), 201)
-        }
-        console.error('imgbed 上传失败:', auth.replace(/(\S{8})\S*/, '$1***'), r.status, JSON.stringify(j).slice(0, 200))
-      } catch (e) {
-        console.error('imgbed 网络异常:', e && e.message)
-      }
+  if (strategy === 'imgbed-api') {
+    const { url } = await forwardToImgbed(c.env, file)
+    if (url) {
+      return c.json(ok({ url, strategy: 'imgbed', by: uid, size: file.size, type: file.type }, '上传成功'), 201)
     }
   }
 
-  // ② 兜底：picsum 语义占位图（按文件名+时间散列，稳定可复现）
+  // 兜底：picsum 语义占位图（按文件名+时间散列，稳定可复现）
   const seed = `${(file.name || 'img').replace(/\W+/g, '').slice(0, 20)}-${uid}-${Date.now() % 100000}`
   const url = `https://picsum.photos/seed/${encodeURIComponent(seed)}/1080/1440`
   return c.json(ok({
     url, strategy: 'placeholder', by: uid, size: file.size, type: file.type,
     hint: '图床未配置（IMAGE_UPLOAD_STRATEGY/IMG_API_URL/IMG_API_TOKEN），已使用占位图'
   }, '上传成功（占位图模式）'), 201)
+}
+
+// 视频上传：走 imgbed 存储（视频不可用占位图顶替，失败即报错）
+const videoUploadHandler = async (c) => {
+  const uid = c.get('auth').uid
+  const form = await c.req.formData().catch(() => null)
+  const file = form && form.get('file')
+  if (!file || typeof file === 'string') return fail(400, '请选择要上传的视频文件', 400)
+  if (file.size > 100 * 1024 * 1024) return fail(400, '视频大小不能超过 100MB', 400)
+  if (!/^video\//.test(file.type || '')) return fail(400, '仅支持视频文件（图片请用 /upload/single）', 400)
+
+  const { url, reason } = await forwardToImgbed(c.env, file)
+  if (!url) {
+    return fail(500, reason === 'unconfigured'
+      ? '视频上传需要配置图床（IMG_API_URL / IMG_API_TOKEN secret），图片暂不支持视频占位'
+      : '视频上传图床失败，请稍后重试', 500)
+  }
+
+  // 可选缩略图：一并转存图床，前端封面直接外链
+  let coverUrl = null
+  const thumb = form && form.get('thumbnail')
+  if (thumb && typeof thumb !== 'string' && /^image\//.test(thumb.type || '')) {
+    const t = await forwardToImgbed(c.env, thumb)
+    coverUrl = t.url
+  }
+
+  return c.json(ok({
+    url, coverUrl, strategy: 'imgbed', by: uid, size: file.size, type: file.type, name: file.name || 'video.mp4'
+  }, '视频上传成功'), 201)
 }
 
 app.post('/api/upload/single', requireAuth, uploadHandler)
@@ -1139,6 +1329,7 @@ app.post('/api/upload/multiple', requireAuth, async (c) => {
   // 此端点保留兼容：直接按单张处理
   return uploadHandler(c)
 })
+app.post('/api/upload/video', requireAuth, videoUploadHandler)
 
 // 全局错误兜底
 app.onError((err, c) => {

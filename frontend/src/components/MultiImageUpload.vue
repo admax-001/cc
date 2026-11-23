@@ -40,6 +40,13 @@
       </div>
     </div>
 
+    <!-- 链接上传：粘贴图片 URL 直接加入列表 -->
+    <div v-if="imageList.length < maxImages" class="url-upload-row">
+      <input v-model="urlInput" type="url" class="url-input" placeholder="粘贴图片链接（https://...）直接添加"
+        @keyup.enter="addImageByUrl" :disabled="isUploading" />
+      <button class="url-add-btn" :disabled="!urlInput.trim() || isUploading" @click="addImageByUrl">添加</button>
+    </div>
+
     <div v-if="error" class="error-message">
       {{ error }}
     </div>
@@ -187,6 +194,35 @@ watch(imageList, (newValue) => {
 
 const triggerFileInput = () => {
   fileInput.value?.click()
+}
+
+// ---------- 链接上传：粘贴图片 URL 直接加入列表 ----------
+const urlInput = ref('')
+const addImageByUrl = () => {
+  const url = urlInput.value.trim()
+  if (!url) return
+  if (imageList.value.length >= props.maxImages) {
+    showMessageUrl(`最多只能添加${props.maxImages}张图片`)
+    return
+  }
+  const u = /^https?:\/\//i.test(url) ? url : `https://${url}`
+  if (!/^https?:\/\/.+\..+/i.test(u)) {
+    showMessageUrl('请输入有效的图片链接')
+    return
+  }
+  if (imageList.value.some(it => it.url === u || it.preview === u)) {
+    showMessageUrl('该图片链接已存在')
+    return
+  }
+  imageList.value.push({ id: generateId(), file: null, preview: u, uploaded: true, url: u, description: null })
+  urlInput.value = ''
+  showMessageUrl('图片链接已添加', 'success')
+}
+const showMessageUrl = (msg, type = 'error') => {
+  toastMessage.value = msg
+  toastType.value = type
+  showToast.value = true
+  setTimeout(() => { showToast.value = false }, 2000)
 }
 
 const createImagePreview = (file) => {
@@ -734,6 +770,46 @@ defineExpose({
 <style scoped>
 .multi-image-upload {
   width: 100%;
+}
+
+/* 链接上传行 */
+.url-upload-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.url-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color-primary);
+  border-radius: 8px;
+  background: var(--bg-color-secondary);
+  color: var(--text-color-primary);
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.url-input:focus {
+  border-color: var(--primary-color, #4fc08d);
+}
+
+.url-add-btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 8px;
+  background: var(--primary-color, #4fc08d);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.url-add-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .upload-grid {

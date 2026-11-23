@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS posts (
   content       TEXT NOT NULL,
   category_id   INTEGER REFERENCES categories(id),
   location      TEXT,
+  video_url     TEXT,
+  cover_url     TEXT,
   view_count    INTEGER NOT NULL DEFAULT 0,
   like_count    INTEGER NOT NULL DEFAULT 0,
   comment_count INTEGER NOT NULL DEFAULT 0,
