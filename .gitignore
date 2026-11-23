@@ -1,12 +1,12 @@
 # 依赖与构建产物
 node_modules/
-dist/
+# dist/ 提交进仓库：Cloudflare Git 集成（Workers Builds）只执行 wrangler deploy，
+# 不跑构建命令，必须随仓库携带前端构建产物
 dist-verify/
 
 # wrangler 本地状态与凭据
 .wrangler/
 .dev.vars
-.wrangler/
 
 # 日志与备份
 *.log
