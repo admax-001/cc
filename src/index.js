@@ -194,8 +194,8 @@ app.get('/api/posts/:id', optionalAuth, async (c) => {
   ).bind(id).all()
   if (!results || results.length === 0) return fail(404, '笔记不存在', 404)
   const p = results[0]
-  // 草稿（status=1）仅作者本人可看：未登录或非本人一律 404（不泄露存在性）
-  if (p.status === 1) {
+  // 非公开状态（1草稿/2审核中/3审核失败）仅作者本人可看：未登录或非本人一律 404（不泄露存在性）
+  if (p.status !== 0) {
     const auth = c.get('auth')
     if (!auth || !auth.uid || auth.uid !== p.author_auto_id) return fail(404, '笔记不存在', 404)
   }
@@ -382,22 +382,30 @@ app.get('/api/users/:userId', optionalAuth, async (c) => {
 })
 
 // ---------- 用户笔记列表（实装：原 V1 空壳 → 真实分页）----------
-app.get('/api/users/:userId/posts', async (c) => {
+// status=all 时返回本人全部状态（已发布/草稿/审核中/审核失败，供笔记管理页），仅限本人请求；
+// 其余情况（含未登录/非本人）只返回公开已发布（status=0）
+app.get('/api/users/:userId/posts', optionalAuth, async (c) => {
   const key = String(c.req.param('userId'))
   const u = await c.env.DB.prepare('SELECT id FROM users WHERE id = ? OR user_id = ?').bind(num(key, -1), key).first()
   if (!u) return fail(404, '用户不存在', 404)
   const { page, limit, offset } = pager(c)
+  const auth = c.get('auth')
+  const isSelf = !!(auth && auth.uid === u.id)
+  const wantAll = c.req.query('status') === 'all' && isSelf
+  const statusCond = wantAll ? 'p.status IN (0, 1, 2, 3)' : 'p.status = 0'
   const [cnt] = (await c.env.DB.prepare(
-    'SELECT COUNT(*) AS total FROM posts WHERE user_id = ? AND status = 0'
+    `SELECT COUNT(*) AS total FROM posts WHERE user_id = ? AND ${statusCond.includes('IN') ? 'status IN (0,1,2,3)' : 'status = 0'}`
   ).bind(u.id).all()).results
   const { results } = await c.env.DB.prepare(
     `SELECT ${POST_FIELDS}
        FROM posts p LEFT JOIN users u ON p.user_id = u.id LEFT JOIN categories c ON p.category_id = c.id
-       WHERE p.user_id = ? AND p.status = 0
+       WHERE p.user_id = ? AND ${statusCond}
        ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?`
   ).bind(u.id, limit, offset).all()
+  // 非公开状态的帖子附加说明字段（前端标签渲染用）
+  const posts = results.map(r => ({ ...toFrontPost(r), author_self: isSelf }))
   return c.json(ok({
-    posts: results.map(toFrontPost),
+    posts,
     pagination: { page, limit, total: cnt ? cnt.total : 0, pages: Math.ceil((cnt ? cnt.total : 0) / limit) }
   }))
 })
@@ -802,14 +810,17 @@ app.post('/api/posts', requireAuth, async (c) => {
   const uid = c.get('auth').uid
   const title = String(b.title || '').trim()
   const content = String(b.content || '').trim()
-  // 状态：1=草稿（存起来不公开）；2=待审核（无审核流，视同发布）；0/缺省=发布
-  const status = (b.status === 1 || b.status === '1') ? 1 : 0
+  // 状态：1=草稿；2=审核中（视频后台上传中：先落库占位，传完自动转发布，失败转 3）
+  //       0/2 之外的值（包括前端旧发的 2=待审核）同 0 直接发布
+  let status = 0
+  if (b.status === 1 || b.status === '1') status = 1
+  else if (b.status === 2 || b.status === '2') status = 2
   if (status === 0) {
     if (!title || title.length > 100) return fail(400, '标题必填且不超过 100 字', 400)
     if (!content) return fail(400, '正文不能为空', 400)
     if (content.length > 5000) return fail(400, '正文不超过 5000 字', 400)
   } else {
-    // 草稿放宽：标题/正文至少一项非空；长度上限仍然生效
+    // 草稿/审核中放宽：标题/正文至少一项非空；长度上限仍然生效
     if (!title && !content) return fail(400, '标题和正文至少填写一项', 400)
     if (title.length > 100) return fail(400, '标题不超过 100 字', 400)
     if (content.length > 5000) return fail(400, '正文不超过 5000 字', 400)
@@ -872,9 +883,13 @@ app.put('/api/posts/:id', requireAuth, async (c) => {
   const b = await c.req.json().catch(() => ({}))
   const title = b.title != null ? String(b.title).trim() : null
   const content = b.content != null ? String(b.content).trim() : null
-  // 状态切换：status=1 存/保持草稿；status=0/2 发布（草稿箱点"发布"即转公开）
+  // 状态切换：1=草稿；2=审核中（视频上传占位）；3=审核失败（视频上传失败）；
+  // 0/其它=发布（审核中视频上传完成的"审核通过"就是转 0 + 补 video_url）
   const updateStatus = b.status !== undefined
-  const newStatus = (b.status === 1 || b.status === '1') ? 1 : 0
+  let newStatus = 0
+  if (b.status === 1 || b.status === '1') newStatus = 1
+  else if (b.status === 2 || b.status === '2') newStatus = 2
+  else if (b.status === 3 || b.status === '3') newStatus = 3
 
   // 发布校验：合并现有值与传入值，标题/正文必须完整、长度达标
   const finalTitle = title !== null ? title : row.title

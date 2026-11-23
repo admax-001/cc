@@ -104,15 +104,24 @@ const handleInputChange = (event, index) => {
   const fullCode = captchaInputs.value.join('')
   emit('update:captchaText', fullCode)
   if (value) {
-    // 从当前位置的下一个开始找空的输入框
+    // 找第一个空框（只向后找）
+    let next = -1
     for (let i = index + 1; i < captchaInputs.value.length; i++) {
       if (!captchaInputs.value[i]) {
-        inputRefs.value[i]?.focus()
-        return
+        next = i
+        break
       }
     }
-    // 如果右侧没有空的输入框，聚焦到最后一个
-    inputRefs.value[3]?.focus()
+    // 移动端体验修复：只在"目标框 ≠ 当前已聚焦框"时才调用 focus()。
+    // 旧逻辑输完第 4 位会对当前框再次 focus，安卓/微信键盘视为焦点切换 → 收起又展开（闪退）
+    if (next > index && inputRefs.value[next]) {
+      inputRefs.value[next].focus()
+    }
+    // 没空框且不在最后一框（如中间删除过）→ 跳到最后一框
+    else if (next === -1 && index < 3) {
+      inputRefs.value[3]?.focus()
+    }
+    // 输满 4 位后正处最后一框 → 不再触碰焦点，键盘保持，字符不闪
   }
 }
 

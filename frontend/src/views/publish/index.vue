@@ -560,7 +560,6 @@ const handlePublish = async () => {
       }
     } else {
       // 视频上传处理
-
       const videoComponent = videoUploadRef.value
       if (!videoComponent) {
         console.error('❌ 视频组件未初始化')
@@ -571,43 +570,56 @@ const handlePublish = async () => {
       // 检查是否有视频文件需要上传
       const videoData = videoComponent.getVideoData()
 
-      
-      if (videoData && videoData.file && !videoData.uploaded) {
-
-        showMessage('正在上传视频...', 'info')
-        
-        try {
-          const uploadResult = await videoComponent.startUpload()
-
-          
-          if (uploadResult && uploadResult.success) {
-            mediaData = {
-              url: uploadResult.data.url,
-              coverUrl: uploadResult.data.coverUrl,
-              name: uploadResult.data.originalname || videoData.name,
-              size: uploadResult.data.size || videoData.size
-            }
-
-          } else {
-            console.error('❌ 视频上传失败:', uploadResult)
-            showMessage('视频上传失败: ' + (uploadResult?.message || '未知错误'), 'error')
-            return
-          }
-        } catch (error) {
-          console.error('❌ 视频上传异常:', error)
-          showMessage('视频上传失败', 'error')
-          return
-        }
-      } else if (videoData && videoData.url) {
-        // 已经上传过的视频
-
+      if (videoData && (videoData.fromUrl || videoData.uploaded) && videoData.url) {
+        // 链接模式 / 后台自动上传已完成：直接带视频发布
         mediaData = {
           url: videoData.url,
           coverUrl: videoData.coverUrl,
           name: videoData.name,
           size: videoData.size
         }
-
+      } else if (videoData && videoData.file && !videoData.uploaded) {
+        // ===== 视频还在上传中（选视频 2.5s 后已自动后台对接图库开始上传）=====
+        // 先以「审核中」状态占位发布 → 后台继续传 → 传完自动补视频转「审核通过」(发布)；
+        // 上传失败 → 标记「审核失败」帖子保留，可在笔记管理中查看/删除
+        showMessage('视频上传中：笔记先以「审核中」保存，传完自动发布', 'info')
+        const placeholderData = {
+          title: form.title.trim(),
+          content: form.content,
+          images: [],
+          video: null, // 视频尚无 URL，占位
+          tags: form.tags,
+          category_id: form.category_id,
+          type: 2,
+          status: 2 // 审核中（= 视频后台上传中）
+        }
+        const created = await createPost(placeholderData)
+        if (!created.success) {
+          showMessage(created.message || '笔记创建失败', 'error')
+          return
+        }
+        const placeholderId = created.data?.id
+        const uploadResult = await videoComponent.waitForUpload().catch(() => ({ success: false, message: '上传中断' }))
+        if (uploadResult && uploadResult.success && placeholderId) {
+          const finish = await updatePost(placeholderId, {
+            video: { url: uploadResult.data.url, coverUrl: uploadResult.data.coverUrl },
+            status: 0 // 审核通过 → 正式发布
+          })
+          if (finish.success) {
+            showMessage('视频上传完成，笔记已发布（审核通过）', 'success')
+            resetForm()
+            setTimeout(() => { router.push('/post-management') }, 1200)
+          } else {
+            showMessage('视频已传完，但发布失败：' + (finish.message || '请在笔记管理中重试'), 'error')
+          }
+        } else {
+          // 上传失败：占位帖标记审核失败
+          if (placeholderId) {
+            await updatePost(placeholderId, { status: 3 }).catch(() => {})
+          }
+          showMessage('视频上传失败：笔记已标记「审核失败」，请到笔记管理中删除或重新编辑', 'error')
+        }
+        return
       } else {
         console.error('❌ 视频数据异常:', videoData)
         showMessage('视频数据异常', 'error')
@@ -627,7 +639,7 @@ const handlePublish = async () => {
       tags: form.tags,
       category_id: form.category_id,
       type: uploadType.value === 'image' ? 1 : 2, // 1: 图文, 2: 视频
-      status: 2 // 发布状态：2=待审核
+      status: 0 // 直接发布（视频未传完的占位流已在上方独立处理并 return）
     }
 
 

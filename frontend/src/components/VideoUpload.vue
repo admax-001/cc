@@ -107,7 +107,7 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['update:modelValue', 'error', 'change'])
+const emit = defineEmits(['update:modelValue', 'error', 'change', 'upload-start', 'upload-success', 'upload-failed'])
 
 // 响应式数据
 const fileInput = ref(null)
@@ -313,6 +313,22 @@ const handleFile = async (file) => {
 
   // 生成缩略图
   await generateThumbnail(file)
+
+  // 选后自动后台上传（等 2.5s，留出设置自定义封面的时间；发布时若未传完走"审核中"占位流）
+  scheduleAutoUpload()
+}
+
+// ---------- 自动后台上传 ----------
+let autoUploadTimer = null
+let uploadPromise = null
+const scheduleAutoUpload = () => {
+  if (autoUploadTimer) clearTimeout(autoUploadTimer)
+  autoUploadTimer = setTimeout(() => {
+    autoUploadTimer = null
+    if (videoData.value && !videoData.value.uploaded && videoData.value.file && !videoData.value.fromUrl) {
+      startUpload()
+    }
+  }, 2500)
 }
 
 // 处理封面图片文件
@@ -387,70 +403,105 @@ const uploadCustomCover = async () => {
   }
 }
 
-// 开始上传过程
+// 开始上传过程（幂等：进行中重复调用返回同一个 Promise；失败后可重试）
 const startUpload = async () => {
+  if (uploadPromise) return uploadPromise // 已在上传中：复用
   if (!videoData.value || !videoData.value.file) {
     return { success: false, message: '没有视频文件' }
   }
 
-  isUploading.value = true
-  uploadProgress.value = 0
+  uploadPromise = (async () => {
+    isUploading.value = true
+    uploadProgress.value = 0
+    emit('upload-start')
 
-  try {
-    // 确定要传递的缩略图文件
-    let thumbnailToUpload = null
-
-    // 优先使用自定义封面
-    if (customCoverFile.value) {
-      thumbnailToUpload = customCoverFile.value
-    } else if (videoData.value.thumbnail) {
-      thumbnailToUpload = videoData.value.thumbnail
-    }
-
-    // 上传视频和缩略图
-    const result = await videoApi.uploadVideo(
-      videoData.value.file,
-      (progress) => {
-        uploadProgress.value = progress
-      },
-      thumbnailToUpload // 传递缩略图文件
-    )
-
-    if (result.success) {
-      isUploading.value = false
-      if (videoData.value) {
-        videoData.value.uploaded = true
-        videoData.value.url = result.data.url
-        videoData.value.coverUrl = result.data.coverUrl
-
-        // 如果使用了自定义封面，更新显示
-        if (customCoverFile.value && result.data.coverUrl) {
-          customCover.value = result.data.coverUrl
-        }
-
-        emit('update:modelValue', videoData.value.url)
-        showMessage('视频上传成功', 'success')
-        return result // 返回上传结果
+    try {
+      // 确定要传递的缩略图文件
+      let thumbnailToUpload = null
+      // 优先使用自定义封面
+      if (customCoverFile.value) {
+        thumbnailToUpload = customCoverFile.value
+      } else if (videoData.value.thumbnail) {
+        thumbnailToUpload = videoData.value.thumbnail
       }
-    } else {
+
+      // 上传视频和缩略图
+      const result = await videoApi.uploadVideo(
+        videoData.value.file,
+        (progress) => {
+          uploadProgress.value = progress
+        },
+        thumbnailToUpload // 传递缩略图文件
+      )
+
+      if (result.success) {
+        isUploading.value = false
+        if (videoData.value) {
+          videoData.value.uploaded = true
+          videoData.value.url = result.data.url
+          videoData.value.coverUrl = result.data.coverUrl
+
+          // 如果使用了自定义封面，更新显示
+          if (customCoverFile.value && result.data.coverUrl) {
+            customCover.value = result.data.coverUrl
+          }
+
+          emit('update:modelValue', videoData.value.url)
+          emit('upload-success', result)
+          showMessage('视频上传成功', 'success')
+          return result
+        }
+      } else {
+        isUploading.value = false
+        error.value = result.message || '视频上传失败'
+        emit('error', error.value)
+        emit('upload-failed', error.value)
+        showMessage(error.value, 'error')
+        return result
+      }
+    } catch (err) {
+      console.error('视频上传失败:', err)
       isUploading.value = false
-      error.value = result.message || '视频上传失败'
+      error.value = '视频上传失败，请重试'
       emit('error', error.value)
+      emit('upload-failed', error.value)
       showMessage(error.value, 'error')
-      return result // 返回失败结果
+      return { success: false, message: '视频上传失败，请重试' }
+    } finally {
+      uploadPromise = null // 结束后清引用，允许重试
     }
-  } catch (err) {
-    console.error('视频上传失败:', err)
-    isUploading.value = false
-    error.value = '视频上传失败，请重试'
-    emit('error', error.value)
-    showMessage(error.value, 'error')
-    return { success: false, message: '视频上传失败，请重试' }
+  })()
+
+  return uploadPromise
+}
+
+// 等待上传结果（发布时用）：已传完立即返回；进行中等待；未启动则立即启动
+const waitForUpload = async () => {
+  if (uploadPromise) return uploadPromise
+  if (videoData.value && videoData.value.uploaded && videoData.value.url) {
+    return { success: true, data: { url: videoData.value.url, coverUrl: videoData.value.coverUrl } }
   }
+  if (videoData.value && videoData.value.fromUrl && videoData.value.url) {
+    return { success: true, data: { url: videoData.value.url, coverUrl: videoData.value.coverUrl } }
+  }
+  if (videoData.value && videoData.value.file) {
+    if (autoUploadTimer) { // 定时器还没触发：立即启动
+      clearTimeout(autoUploadTimer)
+      autoUploadTimer = null
+    }
+    return startUpload()
+  }
+  return { success: false, message: '没有视频文件' }
 }
 
 // 移除视频
 const removeVideo = () => {
+  if (autoUploadTimer) {
+    clearTimeout(autoUploadTimer)
+    autoUploadTimer = null
+  }
+  // 进行中的上传结果作废：等待者拿到失败语义
+  uploadPromise = null
   if (videoData.value && videoData.value.preview) {
     URL.revokeObjectURL(videoData.value.preview)
   }
@@ -505,6 +556,7 @@ defineExpose({
   reset,
   removeVideo,
   startUpload,
+  waitForUpload,
   customCoverFile,
   uploadCustomCover
 })
