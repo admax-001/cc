@@ -14,7 +14,7 @@
 
 前端 + API 由**同一个 Cloudflare Worker 同域托管**：Vue3 静态资产 + Hono API + D1 免费额度，无服务器、免证书、免运维，**月成本 0 元**。
 
-> **部署方式**：① 本地/CI 命令行一键部署 `node deploy.mjs`（自动建库、导数据、JWT 密钥兑底）；② Cloudflare Git 集成（Workers Builds）连接本仓库即可直接部署：构建设置全用默认值（Deploy command `npx wrangler deploy`，其余留空），dist/ 与 database_id 均已随仓库就绪，JWT_SECRET 为持久 secret 不会丢。全新账号无现成 D1 库时才需 Deploy command 改 `node deploy.mjs` 并配自定义构建令牌（含 D1 权限）。
+> **部署方式**：① 本地/CI 命令行一键部署 `node deploy.mjs`（自动建库、导数据、JWT 密钥兜底）；② Cloudflare Git 集成（Workers Builds）连接本仓库即可直接部署：构建设置全用默认值（Deploy command `npx wrangler deploy`，其余留空），dist/ 与 database_id 均已随仓库就绪，JWT_SECRET 为持久 secret 不会丢。**全新账号部署**：连接时 Worker 名填 `xf-api`（须与配置一致），Deploy command 改 `node deploy.mjs`，构建令牌填含 D1:Edit 的自定义 API Token，详见 [docs/deployment.md](docs/deployment.md)。
 
 ## ✨ 特性
 

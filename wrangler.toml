@@ -1,10 +1,12 @@
 # 黑小帅 V3 API —— Cloudflare Workers 配置（V3 开发线：xf）
-# database_id 已填真实值：Cloudflare Git 集成（Workers Builds）用默认 Deploy command
+# database_id 已填真实值：本账号 Git 集成（Workers Builds）用默认 Deploy command
 # （npx wrangler deploy）即可直接部署——dist/ 已随仓库提交，D1 库与 JWT_SECRET（持久 secret）均已存在。
 # 说明：单独的 database ID 无法被用于操作数据库（需账号级 API Token），公开无安全风险。
-# 若日后要在全新 Cloudflare 账号一键部署：把它改回占位符 "local-dev-placeholder"，
-# 并把 Git 集成 Deploy command 改为 node deploy.mjs + 在“构建令牌”填自定义 API Token
-# （Workers Scripts:Edit + D1:Edit + Account:Read；默认构建令牌无 D1 权限，跑不了建库步骤）。
+# 全新 Cloudflare 账号一键部署（Git 集成连接本仓库）：
+#   1) 连接时 Worker 名必须填 xf-api（与下方 name 一致，否则 JWT_SECRET 注入步骤会找错 Worker）
+#   2) Deploy command 改为 node deploy.mjs（默认命令不会建库，会报 D1 database not found）
+#   3) “构建令牌”填自定义 API Token：Account Settings:Read + Workers Scripts:Edit + D1:Edit
+#      （默认构建令牌无 D1 建库权限；database_id 无需改占位符，deploy.mjs 按库名查找/创建并回写）
 # 部署隔离：全新 Worker xf-api + 全新 D1 库 xf，与 V1（xiaoshiliu-api）/ V2（hxs-api）并行互不影响。
 
 name = "xf-api"
