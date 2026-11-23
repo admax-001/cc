@@ -1,6 +1,6 @@
 # 部署手册
 
-黑小帅支持三种部署姿势，任选其一，全部**0 元托管**（Cloudflare 免费额度）。
+黑小帅支持四种部署姿势，任选其一，全部**0 元托管**（Cloudflare 免费额度）。
 
 ## 前置要求
 
@@ -15,18 +15,19 @@ npx wrangler login   # 浏览器授权登录一次（弹页点击 Allow）
 node deploy.mjs      # 一键完成剩余全部
 ```
 
-`deploy.mjs` 8 个步骤，**幂等可重跑**（已存在的资源自动跳过）：
+`deploy.mjs` 9 个步骤，**幂等可重跑**（已存在的资源自动跳过）：
 
 | 步骤 | 内容 | 说明 |
 |---|---|---|
 | 1/8 | 依赖检查 | 缺 `node_modules` 自动 `npm install` |
 | 2/8 | 登录检查 | `wrangler whoami`，未登录给出引导 |
-| 3/8 | D1 数据库 | 已存在则跳过，不存在则创建 `xiaoshiliu` |
-| 4/8 | 回写配置 | `database_id` 自动写入 `wrangler.toml` |
-| 5/8 | 建表 | 导入 `schema.sql`（7 张表，IF NOT EXISTS 幂等） |
-| 6/8 | 种子数据 | 导入 `seed.sql`（导入前自动清空旧数据） |
+| 3/8 | D1 数据库 | 已存在则跳过，不存在则创建 `xf` |
+| 4/8 | 回写配置 | `database_id` 自动写入 `wrangler.toml`（仓库里是占位符，无资源 ID 泄露） |
+| 5/8 | 建表 | 导入 `schema.sql` + V2/V3 迁移（幂等） |
+| 6/8 | 种子数据 | 已有用户则跳过（保护已注册账号与首个管理员） |
 | 7/8 | 前端构建 | Vue3 → `dist/`；`--api-only` 可跳过 |
 | 8/8 | 发布 + 自检 | `wrangler deploy` 后请求 `/api/health` |
+| 9/9 | JWT 密钥兑底 | 未设置时自动生成强随机密钥并注入；已存在则跳过，绝不覆盖 |
 
 **Windows 用户提示**：中文路径下会自动切换到英文目录构建再拷回，无需手动处理；
 网络抖动自动重试 3 次。
@@ -50,10 +51,20 @@ npm run deploy        # 等价 wrangler deploy（跳过重新构建）
    | `CLOUDFLARE_API_TOKEN` | 上一步创建的 Token |
    | `CLOUDFLARE_ACCOUNT_ID` | dash 右侧栏 Account ID |
 
-4. 推送到 `main` 分支，`.github/workflows/deploy.yml` 自动执行
-   `node deploy.mjs` 完成部署；也可在 Actions 页手动触发（workflow_dispatch）。
+4. 在 Actions 页手动触发 "Deploy to Cloudflare Workers"（workflow_dispatch），
+   自动执行 `node deploy.mjs` 完成部署。
 
-## 方式三：API Token 纯命令行（服务器 / CI 无浏览器）
+## 方式三：Cloudflare Git 集成（Workers Builds）
+
+仓库连接 Cloudflare 后，push 即自动构建部署。**务必把 Deploy command 设为
+`node deploy.mjs`**（默认 `npx wrangler deploy` 不会建库/回写占位符 database_id）：
+
+1. Cloudflare Dashboard → Workers & Pages → 创建 Worker → 连接 GitHub 仓库。
+2. 构建设置里 Deploy command 填 `node deploy.mjs`（构建命令留空即可）。
+3. 每次推送到 `main` 自动部署；前端 `dist/` 已随仓库提交，本地改动后重跑
+   `node deploy.mjs` 再推即可更新产物。
+
+## 方式四：API Token 纯命令行（服务器 / CI 无浏览器）
 
 ```bash
 set CLOUDFLARE_API_TOKEN=你的token      # macOS/Linux: export CLOUDFLARE_API_TOKEN=...
@@ -97,7 +108,7 @@ cd frontend && npm run dev    # 仅前端 @5173（vite 代理 /api → 8787）
 
 | 问题 | 处理 |
 |---|---|
-| 重新部署会覆盖数据吗？ | `deploy.mjs` 每次重导种子数据（先清空再导入）；生产数据请先 `npm run db:export` 备份 |
+| 重新部署会覆盖数据吗？ | 不会：`deploy.mjs` 检测到已有用户自动跳过种子导入（保护注册账号与管理员）；建表/迁移全部幂等 |
 | 想换一批内容？ | `npm run gen:seed` 重新生成 `seed.sql` 后重跑 `node deploy.mjs` |
 | 前端改了代码怎么发布？ | 重跑 `node deploy.mjs`（自动重新构建 dist 并部署） |
 | D1 导入报事务错误？ | D1 不支持 `BEGIN TRANSACTION` / `PRAGMA`，`wrangler d1 execute --file` 本身原子，无需包裹 |

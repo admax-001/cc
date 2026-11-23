@@ -1,5 +1,7 @@
-# 推送到 main 分支时自动部署到 Cloudflare Workers
-# 前置：仓库 Settings → Secrets and variables → Actions 配置两个 secret
+# GitHub Actions 手动部署（workflow_dispatch）
+# 说明：日常部署优先走 Cloudflare Git 集成（Workers Builds，Deploy command 设为 node deploy.mjs）
+# 或本地 node deploy.mjs；本工作流改为仅手动触发，避免未配置 secrets 时每次 push 都失败。
+# 使用前在仓库 Settings → Secrets and variables → Actions 配置两个 secret：
 #   CLOUDFLARE_API_TOKEN   —— https://dash.cloudflare.com/profile/api-tokens 创建
 #                             （模板选 "Edit Cloudflare Workers" 或自定义最小权限：
 #                             Workers Scripts:Edit + D1:Edit + Account:Read）
@@ -7,8 +9,6 @@
 name: Deploy to Cloudflare Workers
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch: {}
 
 jobs:

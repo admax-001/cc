@@ -16,8 +16,10 @@
 //   6. 构建前端（Vue3 → dist，可用 --api-only 跳过）
 //   7. wrangler deploy 发布 Worker（前端 + API 同域托管）
 //   8. 部署后自检 /api/health 并输出访问地址
+//   9. JWT_SECRET 兜底：未设置时自动生成强随机密钥并注入（已存在则跳过，绝不覆盖）
 // ============================================================
 import { spawnSync } from 'node:child_process'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -300,6 +302,38 @@ if (urlM) {
     }
   } catch {
     T('  ~ 服务已上线，边缘节点传播需几秒，稍后访问：' + apiUrl + '/api/health')
+  }
+}
+
+// 9. JWT_SECRET 兜底：未设置时自动生成并注入（认证/登录依赖它，缺失会导致登录注册不可用）
+T('\n[9/9] 检查 JWT_SECRET ...')
+const secList = wr(['secret', 'list'])
+if (!secList.ok) {
+  T('  ~ 无法查询 secret 列表（' + (secList.out || '').slice(-120).trim() + '）')
+  T('  请手动确认并设置（在本项目目录执行，自动读取 wrangler.toml 的 Worker 名）：')
+  T('      npx wrangler secret put JWT_SECRET')
+} else if (/JWT_SECRET/i.test(secList.out)) {
+  T('  √ JWT_SECRET 已存在（跳过，绝不覆盖线上密钥，已有登录态不受影响）')
+} else {
+  // 仅在“查询成功且确认不存在”时才写入，避免误覆盖线上已有密钥
+  const newSecret = crypto.randomBytes(48).toString('base64url')
+  const wc = wranglerCmd()
+  const needShellSec = IS_WIN && /\.(cmd|bat)$/i.test(wc.cmd)
+  const put = spawnSync(wc.cmd, [...wc.args, 'secret', 'put', 'JWT_SECRET'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    timeout: 180000,
+    windowsHide: true,
+    shell: needShellSec,
+    input: newSecret + '\n'
+  })
+  const putOut = (put.stdout || '') + (put.stderr || '')
+  if (put.status === 0 && /Success/i.test(putOut)) {
+    T('  √ 已自动生成强随机 JWT_SECRET 并注入（值不回显；这是唯一来源，请勿泄露）')
+  } else {
+    T('  × 自动注入失败：' + putOut.slice(-200))
+    T('  请手动执行：npx wrangler secret put JWT_SECRET（设置前登录/注册不可用）')
+    process.exit(1)
   }
 }
 
