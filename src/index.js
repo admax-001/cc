@@ -1085,23 +1085,41 @@ const uploadHandler = async (c) => {
 
   // ① imgbed 直传（已配置才走）
   if (strategy === 'imgbed-api' && apiUrl && token) {
-    try {
-      const fwd = new FormData()
-      fwd.append('file', file, file.name || 'image.png')
-      const r = await fetch(apiUrl, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: fwd
-      })
-      const j = await r.json().catch(() => null)
-      const url = j && (j.data?.url || j.url || j.data?.[0]?.url || (Array.isArray(j) && j[0]?.url))
-      if (r.ok && url) {
-        return c.json(ok({ url, strategy: 'imgbed', by: uid, size: file.size, type: file.type }, '上传成功'), 201)
+    // 鉴权兼容：CF-ImgBed 系图床标准为 Authorization: <裸token>；
+    // 若 secret 里已带 "Bearer " 前缀则原样透传，否则先裸后 Bearer 各试一次
+    const authVariants = /^bearer\s/i.test(token)
+      ? [token]
+      : [token, `Bearer ${token}`]
+    for (const auth of [...new Set(authVariants)]) {
+      try {
+        const fwd = new FormData()
+        fwd.append('file', file, file.name || 'image.png')
+        const r = await fetch(apiUrl, {
+          method: 'POST',
+          headers: { Authorization: auth },
+          body: fwd
+        })
+        const j = await r.json().catch(() => null)
+        // 兼容两类响应格式：
+        //   对象式：{ data: { url } } / { url } / { data: [{ url }] }
+        //   CF-ImgBed 式：{ code: 200, data: ["/file/xxx.png"] }（相对路径数组，需拼 IMG_BASE_URL）
+        let url = j && (j.data?.url || j.url || j.data?.[0]?.url)
+        if (!url && j && Array.isArray(j.data) && typeof j.data[0] === 'string') {
+          const p = j.data[0]
+          if (/^https?:\/\//i.test(p)) {
+            url = p
+          } else {
+            const base = (c.env.IMG_BASE_URL || apiUrl.replace(/\/upload.*$/, '')).trim().replace(/\/+$/, '')
+            url = `${base}${p.startsWith('/') ? '' : '/'}${p}`
+          }
+        }
+        if (r.ok && url) {
+          return c.json(ok({ url, strategy: 'imgbed', by: uid, size: file.size, type: file.type }, '上传成功'), 201)
+        }
+        console.error('imgbed 上传失败:', auth.replace(/(\S{8})\S*/, '$1***'), r.status, JSON.stringify(j).slice(0, 200))
+      } catch (e) {
+        console.error('imgbed 网络异常:', e && e.message)
       }
-      // imgbed 失败 → 兜底占位（发布流程不中断）
-      console.error('imgbed 上传失败:', r.status, JSON.stringify(j).slice(0, 200))
-    } catch (e) {
-      console.error('imgbed 网络异常:', e && e.message)
     }
   }
 
