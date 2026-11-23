@@ -1,18 +1,24 @@
 #!/usr/bin/env node
 // ============================================================
-// 黑小帅 V3 API · Cloudflare 一键部署脚本（V3 开发线：xf）
+// 黑小帅 V3 API · Cloudflare 一键部署脚本（可多实例）
 // 用法：node deploy.mjs
 // 前提：已完成 Cloudflare 账号登录（npx wrangler login，浏览器授权一次）
 // 或设置环境变量 CLOUDFLARE_API_TOKEN（CI/无浏览器场景）
 //
-// 部署隔离：全新 Worker xf-api + 全新 D1 库 xf，与 V1（xiaoshiliu-api）/ V2（hxs-api）并行互不影响
+// 多实例部署（同账号部署多个独立 Worker，互不影响）：
+//   WORKER_NAME  Worker 名（默认 xf-api）——建议与 Git 集成连接时的 Worker 名一致
+//   DB_NAME      D1 数据库名（默认 xf）
+//   本地：set WORKER_NAME=cc&& set DB_NAME=cc&& node deploy.mjs
+//   CI（Workers Builds）：构建设置 → 构建变量填 WORKER_NAME、DB_NAME
+//   不设变量 = 默认实例 xf-api + xf（向后兼容）
+//   部署脚本会把 name/database_name/database_id 回写进 wrangler.toml 保持一致
 //
 // 脚本自动完成：
 //   1. 依赖检查（缺 node_modules 自动 npm install）
 //   2. 登录检查（wrangler whoami）
-//   3. D1 数据库检查/创建（不存在则创建 xf）
-//   4. database_id 自动回写 wrangler.toml（无需手动改配置）
-//   5. 导入建表 schema.sql + 种子数据 seed.sql
+//   3. D1 数据库查找/创建（d1 list 按名匹配，避开 CI 令牌下 d1 info 的不一致行为）
+//   4. name/database_name/database_id 自动回写 wrangler.toml
+//   5. 导入建表 schema.sql + 迁移 + 种子数据（已有用户则跳过）
 //   6. 构建前端（Vue3 → dist，可用 --api-only 跳过）
 //   7. wrangler deploy 发布 Worker（前端 + API 同域托管）
 //   8. 部署后自检 /api/health 并输出访问地址
@@ -28,11 +34,14 @@ import { fileURLToPath } from 'node:url'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname)
 const TOML = path.join(ROOT, 'wrangler.toml')
-const DB_NAME = 'xf'
+// 多实例配置（默认 xf-api/xf，向后兼容；CI 构建变量可覆盖）
+const WORKER_NAME = (process.env.WORKER_NAME || 'xf-api').trim()
+const DB_NAME = (process.env.DB_NAME || 'xf').trim()
 
 const IS_WIN = process.platform === 'win32'
 const NPM = IS_WIN ? 'npm.cmd' : 'npm'
 const T = (s) => console.log(s)
+T(`  实例配置：Worker=${WORKER_NAME} · D1=${DB_NAME}` + (process.env.WORKER_NAME || process.env.DB_NAME ? '（来自环境变量）' : '（默认）'))
 
 // ---------- 执行工具 ----------
 function run(cmd, args, { timeout = 600000, env = {}, cwd = ROOT } = {}) {
@@ -126,58 +135,62 @@ if (!who.ok) {
   T('  ─────────────────────────────────────────────')
   process.exit(1)
 }
-const emailMatch = who.out.match(/you are logged in as (\S+?)\s*\(/i) || who.out.match(/account/i)
-T(`  √ 已登录${emailMatch ? '：' + emailMatch[1] : ''}`)
+const emailMatch = who.out.match(/you are logged in as\s+(\S+?)[\s(]/i) || who.out.match(/with email\s+(\S+?)[\s(]/i)
+T(`  √ 已登录${emailMatch && emailMatch[1] ? '：' + emailMatch[1] : '（API Token 模式）'}`)
 
-// 3. D1 数据库：查询或创建
+// 3. D1 数据库：d1 list 按名查找（CI 令牌下 d1 info 会误报不存在→create 撞名，list 才可靠）
 T(`\n[3/8] 检查 D1 数据库 ${DB_NAME} ...`)
-let dbId = null
-const info = wr(['d1', 'info', DB_NAME, '--json'])
-if (info.ok) {
+const findDb = () => {
+  const ls = wr(['d1', 'list', '--json'])
+  if (!ls.ok) return null
   try {
-    const j = JSON.parse(info.out.slice(info.out.indexOf('{'), info.out.lastIndexOf('}') + 1))
-    dbId = (j.uuid) || (j.database_id) || (j.databases && j.databases[0] && j.databases[0].uuid)
-  } catch { /* 忽略解析失败 */ }
-  if (dbId) T(`  √ 数据库已存在（id: ${dbId}）`)
+    const arr = JSON.parse(ls.out.slice(ls.out.indexOf('['), ls.out.lastIndexOf(']') + 1))
+    const hit = (Array.isArray(arr) ? arr : []).find(d => d.name === DB_NAME)
+    return hit ? (hit.uuid || hit.database_id) : null
+  } catch { return null }
 }
-if (!dbId) {
+let dbId = findDb()
+if (dbId) {
+  T(`  √ 数据库已存在（id: ${dbId}）`)
+} else {
   T(`  数据库不存在，创建 ${DB_NAME} ...`)
   const create = wr(['d1', 'create', DB_NAME])
-  if (!create.ok) {
-    T('  × 创建失败：\n' + create.out)
-    process.exit(1)
-  }
-  const m = create.out.match(/database_id\s*=?\s*"?([0-9a-f-]{32,})"?/i) || create.out.match(/uuid[:\s]+([0-9a-f-]{32,})/i)
-  if (m) dbId = m[1]
-  if (!dbId) {
-    const re = wr(['d1', 'info', DB_NAME, '--json'])
-    if (re.ok) {
-      try {
-        const j = JSON.parse(re.out.slice(re.out.indexOf('{'), re.out.lastIndexOf('}') + 1))
-        dbId = j.uuid || j.database_id
-      } catch {}
+  if (create.ok) {
+    const m = create.out.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)
+    if (m) {
+      dbId = m[0]
+      T(`  √ 创建成功（id: ${dbId}）`)
+    } else {
+      dbId = findDb() // create 成功但解析不到 id，回查 list
+      if (dbId) T(`  √ 创建成功（id: ${dbId}，由 list 回查确认）`)
     }
+  } else if (/already exists/i.test(create.out)) {
+    T('  ~ 同名数据库已存在，回查账号数据库列表 ...')
+    dbId = findDb()
+    if (dbId) T(`  √ 复用已有数据库（id: ${dbId}）`)
   }
   if (!dbId) {
-    T('  × 未能解析 database_id，请把下面输出里的 database_id 手动填入 wrangler.toml 后重跑：\n' + create.out)
+    T('  × 数据库获取/创建失败：\n' + create.out)
     process.exit(1)
   }
-  T(`  √ 创建成功（id: ${dbId}）`)
 }
 
-// 4. 回写 wrangler.toml
-T('\n[4/8] 回写 database_id 到 wrangler.toml ...')
+// 4. 回写 wrangler.toml（name / database_name / database_id 与本次部署目标保持一致）
+T('\n[4/8] 回写 wrangler.toml ...')
 let toml = fs.readFileSync(TOML, 'utf8')
-if (toml.includes('local-dev-placeholder')) {
-  toml = toml.replace('local-dev-placeholder', dbId)
+const before = toml
+const setTomlKey = (key, val) => {
+  const re = new RegExp(`^(${key}\\s*=\\s*)"[^"]*"`, 'm')
+  if (re.test(toml)) toml = toml.replace(re, `$1"${val}"`)
+}
+setTomlKey('name', WORKER_NAME)
+setTomlKey('database_name', DB_NAME)
+setTomlKey('database_id', dbId)
+if (toml !== before) {
   fs.writeFileSync(TOML, toml)
-  T('  √ 已写入')
-} else if (toml.includes(dbId)) {
-  T('  √ 已是最新')
+  T(`  √ 已写入（name=${WORKER_NAME} · database_name=${DB_NAME} · database_id=${dbId.slice(0, 8)}...）`)
 } else {
-  toml = toml.replace(/database_id\s*=\s*"[^"]*"/, `database_id = "${dbId}"`)
-  fs.writeFileSync(TOML, toml)
-  T('  √ 已更新')
+  T('  √ 配置已一致，无需修改')
 }
 
 // 5. 导入数据
@@ -318,11 +331,11 @@ if (urlM) {
 
 // 9. JWT_SECRET 兜底：未设置时自动生成并注入（认证/登录依赖它，缺失会导致登录注册不可用）
 T('\n[9/9] 检查 JWT_SECRET ...')
-const secList = wr(['secret', 'list'])
+const secList = wr(['secret', 'list', '--name', WORKER_NAME])
 if (!secList.ok) {
   T('  ~ 无法查询 secret 列表（' + (secList.out || '').slice(-120).trim() + '）')
-  T('  请手动确认并设置（在本项目目录执行，自动读取 wrangler.toml 的 Worker 名）：')
-  T('      npx wrangler secret put JWT_SECRET')
+  T('  请手动确认并设置：')
+  T(`      npx wrangler secret put JWT_SECRET --name ${WORKER_NAME}`)
 } else if (/JWT_SECRET/i.test(secList.out)) {
   T('  √ JWT_SECRET 已存在（跳过，绝不覆盖线上密钥，已有登录态不受影响）')
 } else {
@@ -330,7 +343,7 @@ if (!secList.ok) {
   const newSecret = crypto.randomBytes(48).toString('base64url')
   const wc = wranglerCmd()
   const needShellSec = IS_WIN && /\.(cmd|bat)$/i.test(wc.cmd)
-  const put = spawnSync(wc.cmd, [...wc.args, 'secret', 'put', 'JWT_SECRET'], {
+  const put = spawnSync(wc.cmd, [...wc.args, 'secret', 'put', 'JWT_SECRET', '--name', WORKER_NAME], {
     cwd: ROOT,
     encoding: 'utf8',
     timeout: 180000,

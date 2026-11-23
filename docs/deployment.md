@@ -65,12 +65,14 @@ npm run deploy        # 等价 wrangler deploy（跳过重新构建）
 3. 每次推送到 `main` 自动部署；前端 `dist/` 已随仓库提交，本地改动后重跑
    `node deploy.mjs` 再推即可更新产物。
 
-> **全新 Cloudflare 账号（无现成 D1 库）部署本仓库**：连接仓库时 Worker 名必须填
-> `xf-api`（须与 wrangler.toml 的 name 一致，否则 JWT_SECRET 注入会找错 Worker）；
-> Deploy command 改为 `node deploy.mjs`；并在“构建令牌”填自定义 API Token
-> （Account Settings:Read + Workers Scripts:Edit + D1:Edit）——默认构建令牌没有
-> D1 建库权限。database_id 无需改占位符：deploy.mjs 按库名查找/创建并自动回写。
-> 构建成功后，网站上注册的第一个账号即成为唯一管理员。
+> **全新 Cloudflare 账号 / 同账号新实例部署（推荐做法）**：
+> 1. 连接仓库时 Worker 名任意（如 `cc`，不必再叫 xf-api）；
+> 2. Deploy command 改为 `node deploy.mjs`；
+> 3. “构建令牌”填自定义 API Token（Account Settings:Read + Workers Scripts:Edit + D1:Edit）；
+> 4. “构建变量”加两行：`WORKER_NAME=cc`、`DB_NAME=cc`（与连接名一致；不配 = 默认 xf-api/xf）。
+> 部署时 deploy.mjs 自动：list 查库→建独立 D1→回写 toml 三项→建表导种子→部署→注入 JWT_SECRET；
+> 首个注册账号即唯一管理员。同账号可反复用不同 WORKER_NAME/DB_NAME 部署多个互不影响实例。
+> （D1 查找用 d1 list 按名匹配：CI 令牌下 d1 info 会误报不存在→create 撞名）
 
 ## 方式四：API Token 纯命令行（服务器 / CI 无浏览器）
 
